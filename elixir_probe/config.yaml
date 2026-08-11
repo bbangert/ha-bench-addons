@@ -1,11 +1,17 @@
 name: Elixir Probe
 slug: elixir_probe
-version: "0.1.1"
+version: "0.2.0"
 description: Token-gated remote Elixir eval endpoint for validating Supervisor/Core proxy behaviour on a test bench
 arch:
   - aarch64
   - amd64
 init: false
+
+# Pull the published image instead of building on the device. The Supervisor
+# substitutes {arch} and pulls the tag matching `version` above, so the two must
+# move together — bumping one without the other asks for a tag that does not
+# exist. Publishing is .github/workflows/publish.yml.
+image: ghcr.io/bbangert/ha-bench-addons/{arch}-elixir-probe
 
 # Permissions this probe declares. Deliberately minimal: `homeassistant_api`
 # opens Core's API through the Supervisor's proxy, and nothing else is granted.
