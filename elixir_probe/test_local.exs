@@ -153,6 +153,17 @@ expected_paths =
 
 true = Enum.sort(Map.keys(fingerprint["well_known"])) == Enum.sort(expected_paths)
 
+expected_flags =
+  ~w(nosuid nodev noexec relatime noatime nodiratime strictatime lazytime sync dirsync nosymfollow)
+
+for mount <- fingerprint["mounts"] do
+  true = Enum.sort(Map.keys(mount["flags"])) == Enum.sort(expected_flags)
+  true = Enum.all?(Map.values(mount["flags"]), &is_boolean/1)
+end
+
+IO.inspect(Enum.count(fingerprint["mounts"], & &1["flags"]["nosuid"]), label: "nosuid mounts")
+true = Enum.any?(fingerprint["mounts"], & &1["flags"]["nosuid"])
+
 IO.inspect(fingerprint["env"]["PROBE_TOKEN"], label: "PROBE_TOKEN")
 true = fingerprint["env"]["PROBE_TOKEN"] =~ ~r/^<redacted \d+ bytes>$/
 false = String.contains?(Jason.encode!(fingerprint), System.get_env("PROBE_TOKEN"))

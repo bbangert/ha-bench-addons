@@ -38,6 +38,12 @@ defmodule Probe.Fingerprint do
   # and whether privilege can be regained.
   @status_keys ~w(CapInh CapPrm CapEff CapBnd CapAmb NoNewPrivs Seccomp)
 
+  # The VFS flags a mount can carry. Every one is reported for every mount,
+  # present or not, so an off flag reads as `false` instead of as a key that is
+  # simply not there — the two are otherwise indistinguishable to a reader.
+  @mount_flags ~w(nosuid nodev noexec relatime noatime nodiratime strictatime
+                  lazytime sync dirsync nosymfollow)
+
   @redact ~r/TOKEN|SECRET|PASSWORD|PRIVATE|KEY$/i
 
   @doc """
@@ -148,6 +154,8 @@ defmodule Probe.Fingerprint do
     with [head, tail] <- String.split(line, " - ", parts: 2),
          [_id, _parent, _device, root, target, options | _optional] <- String.split(head),
          [fstype, source | _super_options] <- String.split(tail) do
+      set = String.split(options, ",")
+
       [
         %{
           "target" => target,
@@ -155,8 +163,9 @@ defmodule Probe.Fingerprint do
           # onto the source is what makes two such mounts distinguishable.
           "source" => if(root == "/", do: source, else: source <> root),
           "fstype" => fstype,
-          "ro" => "ro" in String.split(options, ","),
-          "options" => options
+          "ro" => "ro" in set,
+          "options" => options,
+          "flags" => Map.new(@mount_flags, &{&1, &1 in set})
         }
       ]
     else
