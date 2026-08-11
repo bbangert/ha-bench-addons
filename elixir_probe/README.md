@@ -44,6 +44,7 @@ calls.
 | `sup(:get, "/addons/self/info")` | the Supervisor API, with this add-on's own token |
 | `core_rest(:get, "/config")` | Core's REST API, via the Supervisor's `/core/api/…` proxy |
 | `core_ws([%{id: 1, type: "get_states"}])` | Core's WebSocket API, via the Supervisor's `/core/websocket` proxy |
+| `fingerprint()` / `fingerprint_report()` | no API at all — this container from inside: env (values redacted by key), `/etc/hosts`, resolver, mounts, uid/gid, capabilities, interfaces, cgroup limits, the add-on paths. `fingerprint_report()` prefixes the version/identity header |
 
 `core_ws/2` completes both handshakes and returns
 `{:ok, %{auth: …, replies: […]}}`, one reply per command. A handshake that ends

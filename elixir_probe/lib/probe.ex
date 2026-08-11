@@ -25,6 +25,12 @@ defmodule Probe do
   @doc "See `Probe.Matrix.report/1`."
   defdelegate report(opts \\ []), to: Probe.Matrix
 
+  @doc "See `Probe.Fingerprint.fingerprint/0`."
+  defdelegate fingerprint(), to: Probe.Fingerprint
+
+  @doc "See `Probe.Fingerprint.report/0`."
+  defdelegate fingerprint_report(), to: Probe.Fingerprint, as: :report
+
   @doc "This add-on's Supervisor token, from the container environment."
   @spec token() :: String.t()
   def token, do: System.get_env("SUPERVISOR_TOKEN", "")

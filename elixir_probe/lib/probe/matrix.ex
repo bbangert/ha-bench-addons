@@ -145,36 +145,12 @@ defmodule Probe.Matrix do
   """
   @spec report(keyword()) :: map()
   def report(opts \\ []) do
-    self_info =
-      case Probe.sup(:get, "/addons/self/info") do
-        %{status: 200, body: %{"data" => data}} ->
-          Map.take(data, [
-            "slug",
-            "version",
-            "hassio_api",
-            "hassio_role",
-            "homeassistant_api",
-            "auth_api"
-          ])
-
-        other ->
-          %{"error" => "could not read self info", "status" => other.status}
-      end
-
-    %{versions: versions(), identity: self_info, paths: paths(), matrix: matrix(opts)}
-  end
-
-  # `/info` is reachable by every permission set, which is what makes it usable
-  # as a fixture header: a row records the system it came from regardless of how
-  # little the probe was granted.
-  defp versions do
-    case Probe.sup(:get, "/info") do
-      %{status: 200, body: %{"data" => data}} ->
-        Map.take(data, ["supervisor", "homeassistant", "hassos", "arch", "machine", "channel"])
-
-      other ->
-        %{"error" => "could not read /info", "status" => other.status}
-    end
+    %{
+      versions: Probe.Header.versions(),
+      identity: Probe.Header.identity(),
+      paths: paths(),
+      matrix: matrix(opts)
+    }
   end
 
   # The API error envelope is `{"result": "error", "message": …}`. Its presence

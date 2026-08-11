@@ -130,4 +130,31 @@ IO.puts("raise reported, connection survived")
 %{body: helper} = Req.post!(base <> "/eval", body: "token()", headers: auth)
 IO.inspect(helper["result"], label: "Probe imported (token/0 reachable)")
 
+# The dev container is not an add-on container, so the values differ from a
+# bench capture — but every section must still come back, tolerantly, and the
+# redaction rule must hold on PROBE_TOKEN, which this script is run with.
+IO.puts("\n== fingerprint reads this container without raising ==")
+fingerprint = Probe.Fingerprint.fingerprint()
+
+sections =
+  ~w(hostname env etc_hosts resolv_conf mounts ids status interfaces cgroup well_known proc)
+
+IO.inspect(Enum.sort(Map.keys(fingerprint)), label: "sections")
+true = Enum.sort(Map.keys(fingerprint)) == Enum.sort(sections)
+
+true = is_binary(fingerprint["hostname"])
+true = is_map(fingerprint["env"])
+true = is_list(fingerprint["etc_hosts"])
+true = is_list(fingerprint["mounts"])
+true = is_list(fingerprint["interfaces"])
+
+expected_paths =
+  ~w(/data /config /share /ssl /media /backup /addons /addon_configs /homeassistant)
+
+true = Enum.sort(Map.keys(fingerprint["well_known"])) == Enum.sort(expected_paths)
+
+IO.inspect(fingerprint["env"]["PROBE_TOKEN"], label: "PROBE_TOKEN")
+true = fingerprint["env"]["PROBE_TOKEN"] =~ ~r/^<redacted \d+ bytes>$/
+false = String.contains?(Jason.encode!(fingerprint), System.get_env("PROBE_TOKEN"))
+
 IO.puts("\nALL LOCAL CHECKS PASSED")
