@@ -1,0 +1,81 @@
+name: Publish probe image
+
+# Builds the probe once per architecture and pushes it to GHCR under the names
+# the Supervisor expects. With `image:` set in an add-on's config.yaml the
+# Supervisor pulls instead of building (`need_build` is just "no image key"),
+# so additional add-on variants that differ only in declared permissions cost
+# nothing to install — they all reference this one image.
+#
+# Naming: the Supervisor substitutes `{arch}` into the image string
+# (`AppModel._image` → `config[ATTR_IMAGE].format(arch=arch)`) and pulls the tag
+# matching the add-on's `version`. So config.yaml wants:
+#
+#   image: ghcr.io/bbangert/ha-bench-addons/{arch}-elixir-probe
+#
+# and this workflow must publish `aarch64-…` and `amd64-…` tagged with that same
+# version.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "elixir_probe/**"
+      - ".github/workflows/publish.yml"
+  workflow_dispatch:
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: read
+        # The add-on version is the pull tag. Read it from config.yaml rather
+        # than duplicating it here, so the two can never disagree.
+        run: |
+          version=$(grep -E '^version:' elixir_probe/config.yaml | sed -E 's/^version:[[:space:]]*"?([^"]+)"?/\1/')
+          [ -n "$version" ] || { echo "::error::could not read version from elixir_probe/config.yaml"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publishing version $version"
+
+  build:
+    needs: version
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners per architecture — no QEMU. Emulated arm64 works too
+          # (docker/setup-qemu-action + platforms:), but an Elixir compile under
+          # emulation turns a one-minute build into a fifteen-minute one.
+          - ha_arch: amd64
+            runner: ubuntu-latest
+          - ha_arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./elixir_probe
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ matrix.ha_arch }}-elixir-probe:${{ needs.version.outputs.version }}
+            ghcr.io/${{ github.repository }}/${{ matrix.ha_arch }}-elixir-probe:latest
+          cache-from: type=gha,scope=${{ matrix.ha_arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.ha_arch }}
+
+      - name: Report what to put in config.yaml
+        run: |
+          echo "::notice::image: ghcr.io/${{ github.repository }}/{arch}-elixir-probe  (version ${{ needs.version.outputs.version }})"
