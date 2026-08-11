@@ -1,6 +1,6 @@
 name: Elixir Probe
 slug: elixir_probe
-version: "0.2.0"
+version: "0.3.0"
 description: Token-gated remote Elixir eval endpoint for validating Supervisor/Core proxy behaviour on a test bench
 arch:
   - aarch64

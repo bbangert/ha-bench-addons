@@ -19,6 +19,12 @@ defmodule Probe do
 
   @supervisor_url "http://supervisor"
 
+  @doc "See `Probe.Matrix.matrix/1`."
+  defdelegate matrix(opts \\ []), to: Probe.Matrix
+
+  @doc "See `Probe.Matrix.report/1`."
+  defdelegate report(opts \\ []), to: Probe.Matrix
+
   @doc "This add-on's Supervisor token, from the container environment."
   @spec token() :: String.t()
   def token, do: System.get_env("SUPERVISOR_TOKEN", "")

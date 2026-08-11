@@ -1,0 +1,34 @@
+name: Probe (role admin)
+slug: probe_admin
+version: "0.3.0"
+description: Permission variant of Elixir Probe — Supervisor API at the admin role
+arch:
+  - aarch64
+  - amd64
+init: false
+
+# Same published image as every other variant; only the permissions below
+# differ. That is what makes a variant free to add: no build, no new image.
+image: ghcr.io/bbangert/ha-bench-addons/{arch}-elixir-probe
+
+# ⚠️  This variant holds the highest role the Supervisor grants, and this image
+# exposes a remote eval endpoint. Together that is unrestricted control of the
+# Supervisor behind one shared secret. Bench only. Uninstall when the run ends.
+
+# The permission set under observation.
+hassio_api: true
+hassio_role: admin
+
+startup: application
+boot: manual
+
+# Distinct host port per variant so several can run at once.
+ports:
+  4000/tcp: 4007
+ports_description:
+  4000/tcp: HTTP eval endpoint — arbitrary code execution, token required
+
+options:
+  auth_token: ""
+schema:
+  auth_token: str

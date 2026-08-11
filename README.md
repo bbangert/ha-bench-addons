@@ -6,6 +6,37 @@ Home Assistant add-ons for poking at APIs from inside an add-on container, on a
 | Add-on | What it is |
 |---|---|
 | [`elixir_probe`](elixir_probe/) | Token-gated remote Elixir eval endpoint, for exercising the Supervisor and Core APIs interactively |
+| `probe_*` | The same image, installed under different declared permissions |
+
+## Permission variants
+
+Which API paths an add-on may reach depends on what it declares in
+`config.yaml`. The `probe_*` add-ons exist to measure that rather than assume
+it: identical code, identical image, one permission set each.
+
+| Add-on | Declares | Host port |
+|---|---|---|
+| `probe_none` | nothing | 4001 |
+| `probe_core_api` | `homeassistant_api` | 4002 |
+| `probe_default` | `hassio_api`, role `default` | 4003 |
+| `probe_homeassistant` | `hassio_api`, role `homeassistant` | 4004 |
+| `probe_backup` | `hassio_api`, role `backup` | 4005 |
+| `probe_manager` | `hassio_api`, role `manager` | 4006 |
+| `probe_admin` | `hassio_api`, role `admin` | 4007 |
+| `probe_auth` | `hassio_api` + `auth_api`, role `default` | 4008 |
+
+Each maps a distinct host port, so several can run at once. `Probe.report/1`
+returns that add-on's identity as the Supervisor records it, alongside the
+outcome of every path in `Probe.Matrix.paths/0` — run it on each variant and the
+set of results describes the authorization surface.
+
+Every probe is a **GET**, including against paths that only accept POST, because
+authorization is decided from the path and never the method. So the matrix
+reads the policy without touching state; a path that authorizes but has no GET
+handler answers 405, which is itself the signal that authorization passed.
+
+`probe_admin` holds the highest role the Supervisor grants and this image
+exposes a remote eval endpoint. Bench only.
 
 ## Adding it to a HAOS installation
 
