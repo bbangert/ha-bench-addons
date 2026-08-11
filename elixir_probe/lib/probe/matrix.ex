@@ -13,25 +13,30 @@ defmodule Probe.Matrix do
   Each result records the raw status, a class, and — where the answer carried
   one — the API's own error message.
 
-  The class distinguishes **where** a refusal came from, which a status code
-  alone does not:
+  The class captures what the answer's *shape* reveals:
 
-    * `:refused`   — refused before the handler: a bare `401`/`403` whose body is
-                     plain text, i.e. the API layer's own exception.
-    * `:rejected`  — the handler ran and declined, recognisable by the JSON error
-                     envelope (`{"result": "error", "message": …}`). Authorization
-                     *passed*; the endpoint applied a rule of its own, such as an
-                     add-on not declaring the service it asked about.
+    * `:rejected`  — the API's own error envelope
+                     (`{"result": "error", "message": …}`). Something ran and
+                     declined for a stated reason, which the `message` names.
+    * `:refused`   — a bare `401`/`403` with no envelope.
     * `:allowed`   — 2xx.
     * `:method`    — 405: authorized, wrong verb for a read.
     * `:not_found` — 404.
     * `:other`     — anything else, with the status kept verbatim.
 
-  That split is the point. `/core/info` and `/auth` both answer 403 to an add-on
-  holding neither permission, but the first never reached a handler and the
-  second reached one that consulted `auth_api` — two different mechanisms that a
-  single `:denied` bucket would flatten into a false match between two
-  implementations.
+  `:rejected` versus `:refused` is worth having: `/core/info` and `/auth` both
+  answer 403 to an add-on holding neither permission, but only the second names
+  a rule (`"Can't use Home Assistant auth!"`), and flattening them into one
+  bucket would let two implementations appear to agree for different reasons.
+
+  **`:refused` does not identify which layer refused.** A bare 401/403 from the
+  API layer and a bare 401/403 from a handler are indistinguishable in the
+  response, and this is not hypothetical: granting `auth_api` moves `/auth` from
+  `:rejected` to `:refused`, because the handler then runs, finds no credentials
+  on a GET, and answers a bare 401. A calibration request with a deliberately
+  invalid token does not disambiguate it — that produces the same bare 401. The
+  raw status is always retained, so nothing is lost; just do not read `:refused`
+  as "never reached a handler".
 
   Paths are baked in rather than passed by the caller so two runs against
   different systems are comparable by construction. `paths/0` is public so a
@@ -104,7 +109,17 @@ defmodule Probe.Matrix do
     # another add-on's namespace — reachable at all?
     "/addons/_slug/info",
     "/addons/_slug/options",
-    "/addons/_slug/logs"
+    "/addons/_slug/logs",
+
+    # The proxies into Core. Without these the matrix cannot see
+    # `homeassistant_api` at all, since that permission governs nothing on the
+    # Supervisor's own surface. `/core/api/stream` is deliberately absent: a GET
+    # on a streaming endpoint blocks until the receive timeout.
+    "/core/api/",
+    "/core/api/config",
+    "/core/api/states",
+    "/homeassistant/api/config",
+    "/core/websocket"
   ]
 
   @doc "The exact path list probed, so a fixture can record it."
@@ -162,11 +177,12 @@ defmodule Probe.Matrix do
     end
   end
 
-  # The API's own error envelope is `{"result": "error", "message": …}`; the
-  # layer above it raises framework exceptions whose body is plain text. So the
-  # body's *shape* is what says whether a handler ran, and the message is worth
-  # keeping — "No access to mqtt service!" and "Can't use Home Assistant auth!"
-  # name the rule that fired, which is the thing worth comparing.
+  # The API error envelope is `{"result": "error", "message": …}`. Its presence
+  # says a stated reason came back; its absence says only that one did not, NOT
+  # which layer answered (see the moduledoc's `:refused` caveat). The message is
+  # the valuable part — "No access to mqtt service!", "App _slug does not exist"
+  # name the rule that fired, and that is what is worth comparing across
+  # implementations.
   defp outcome(%{status: status, body: body}) do
     message = api_message(body)
 
