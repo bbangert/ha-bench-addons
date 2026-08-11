@@ -1,6 +1,6 @@
 name: Probe (auth API)
 slug: probe_auth
-version: "0.3.0"
+version: "0.4.0"
 description: Permission variant of Elixir Probe — the add-on auth backend, at the lowest role
 arch:
   - aarch64

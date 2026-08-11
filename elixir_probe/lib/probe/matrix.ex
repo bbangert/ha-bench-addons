@@ -10,17 +10,28 @@ defmodule Probe.Matrix do
   would without any chance of changing state. A path that authorizes but has no
   GET handler answers 405, which is itself the signal that authorization passed.
 
-  Outcomes are therefore coarse on purpose:
+  Each result records the raw status, a class, and — where the answer carried
+  one — the API's own error message.
 
-    * `:denied`    — 401/403. The credential may not reach this path.
-    * `:allowed`   — 2xx. Reached the handler and it answered.
-    * `:method`    — 405. Authorization passed; wrong verb for a read.
-    * `:not_found` — 404. Reached routing, nothing registered.
-    * `{:other, status}` — anything else, kept verbatim rather than bucketed.
+  The class distinguishes **where** a refusal came from, which a status code
+  alone does not:
 
-  The distinction that matters for comparing two implementations is
-  `:denied` versus everything else. The rest is detail that makes a diff
-  readable when they disagree.
+    * `:refused`   — refused before the handler: a bare `401`/`403` whose body is
+                     plain text, i.e. the API layer's own exception.
+    * `:rejected`  — the handler ran and declined, recognisable by the JSON error
+                     envelope (`{"result": "error", "message": …}`). Authorization
+                     *passed*; the endpoint applied a rule of its own, such as an
+                     add-on not declaring the service it asked about.
+    * `:allowed`   — 2xx.
+    * `:method`    — 405: authorized, wrong verb for a read.
+    * `:not_found` — 404.
+    * `:other`     — anything else, with the status kept verbatim.
+
+  That split is the point. `/core/info` and `/auth` both answer 403 to an add-on
+  holding neither permission, but the first never reached a handler and the
+  second reached one that consulted `auth_api` — two different mechanisms that a
+  single `:denied` bucket would flatten into a false match between two
+  implementations.
 
   Paths are baked in rather than passed by the caller so two runs against
   different systems are comparable by construction. `paths/0` is public so a
@@ -101,16 +112,16 @@ defmodule Probe.Matrix do
   def paths, do: @paths
 
   @doc """
-  Probe every path and classify the outcome.
+  Probe every path and record status, class, and any API error message.
 
       matrix()
       matrix(paths: ["/info", "/addons"])
   """
-  @spec matrix(keyword()) :: %{String.t() => atom() | {atom(), integer()}}
+  @spec matrix(keyword()) :: %{String.t() => map()}
   def matrix(opts \\ []) do
     opts
     |> Keyword.get(:paths, @paths)
-    |> Map.new(fn path -> {path, classify(Probe.sup(:get, path).status)} end)
+    |> Map.new(fn path -> {path, outcome(Probe.sup(:get, path))} end)
   end
 
   @doc """
@@ -135,16 +146,48 @@ defmodule Probe.Matrix do
           %{"error" => "could not read self info", "status" => other.status}
       end
 
-    %{identity: self_info, paths: paths(), matrix: matrix(opts)}
+    %{versions: versions(), identity: self_info, paths: paths(), matrix: matrix(opts)}
   end
 
-  defp classify(status) do
-    cond do
-      status in [401, 403] -> :denied
-      status in 200..299 -> :allowed
-      status == 405 -> :method
-      status == 404 -> :not_found
-      true -> {:other, status}
+  # `/info` is reachable by every permission set, which is what makes it usable
+  # as a fixture header: a row records the system it came from regardless of how
+  # little the probe was granted.
+  defp versions do
+    case Probe.sup(:get, "/info") do
+      %{status: 200, body: %{"data" => data}} ->
+        Map.take(data, ["supervisor", "homeassistant", "hassos", "arch", "machine", "channel"])
+
+      other ->
+        %{"error" => "could not read /info", "status" => other.status}
     end
   end
+
+  # The API's own error envelope is `{"result": "error", "message": …}`; the
+  # layer above it raises framework exceptions whose body is plain text. So the
+  # body's *shape* is what says whether a handler ran, and the message is worth
+  # keeping — "No access to mqtt service!" and "Can't use Home Assistant auth!"
+  # name the rule that fired, which is the thing worth comparing.
+  defp outcome(%{status: status, body: body}) do
+    message = api_message(body)
+
+    class =
+      cond do
+        status in 200..299 -> :allowed
+        status == 405 -> :method
+        status == 404 and is_nil(message) -> :not_found
+        status in [401, 403] and message -> :rejected
+        status in [401, 403] -> :refused
+        message -> :rejected
+        true -> :other
+      end
+
+    %{status: status, class: class}
+    |> then(fn result -> if message, do: Map.put(result, :message, message), else: result end)
+  end
+
+  defp api_message(%{"result" => "error", "message" => message}) when is_binary(message) do
+    String.slice(message, 0, 200)
+  end
+
+  defp api_message(_body), do: nil
 end
