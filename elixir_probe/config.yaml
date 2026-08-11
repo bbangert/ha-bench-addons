@@ -1,0 +1,37 @@
+name: Elixir Probe
+slug: elixir_probe
+version: "0.1.1"
+description: Token-gated remote Elixir eval endpoint for validating Supervisor/Core proxy behaviour on a test bench
+arch:
+  - aarch64
+  - amd64
+init: false
+
+# Permissions this probe declares. Deliberately minimal: `homeassistant_api`
+# opens Core's API through the Supervisor's proxy, and nothing else is granted.
+# Both are stated explicitly rather than defaulted, because what a probe can
+# reach is usually the thing you are trying to observe.
+#
+# Change them, bump `version`, and reinstall — the Supervisor caches the
+# manifest per version.
+homeassistant_api: true
+hassio_api: false
+
+# `boot` is what keeps this from starting on its own. `startup` is a different
+# axis — where in the boot sequence it starts IF it starts — and its only legal
+# values are initialize|system|services|application|once (`AppStartup`,
+# supervisor/const.py). `manual` belongs to `boot`; putting it here fails schema
+# validation, and an app whose config fails validation is skipped silently, so
+# the add-on never appears in the store at all.
+startup: application
+boot: manual
+
+ports:
+  4000/tcp: 4000
+ports_description:
+  4000/tcp: HTTP eval endpoint — arbitrary code execution, token required
+
+options:
+  auth_token: ""
+schema:
+  auth_token: str
