@@ -1,0 +1,54 @@
+name: Rockchip Probe
+slug: rockchip_probe
+version: "0.1.0"
+description: Runs the RK3566/RK3568 NPU, GPU and video codecs from inside an app container and reports what worked
+arch:
+  - aarch64
+init: false
+
+# No `machine:` list: the probe checks the SoC itself and reports
+# "unsupported SoC" elsewhere, which is itself a useful answer.
+image: ghcr.io/bbangert/ha-bench-addons/{arch}-rockchip-probe
+
+hassio_api: false
+homeassistant_api: false
+
+startup: application
+boot: manual
+
+# MPP picks its codec table by matching /proc/device-tree/compatible; without
+# this the path does not resolve and MPP silently falls back to defaults.
+devicetree: true
+
+# Absent nodes are skipped, so the list can be the superset across kernels.
+# The NPU is a DRM device here (renderD129 on the Green), not /dev/rknpu.
+devices:
+  - /dev/dri/card0
+  - /dev/dri/card1
+  - /dev/dri/renderD128
+  - /dev/dri/renderD129
+  - /dev/mali0
+  - /dev/mpp_service
+  - /dev/rga
+  - /dev/dma_heap/system
+  - /dev/dma_heap/system-uncached
+  - /dev/dma_heap/reserved
+  - /dev/rk_dma_heap/rk-dma-heap-cma
+
+ports:
+  8000/tcp: 4010
+ports_description:
+  8000/tcp: Probe report (JSON, read-only)
+
+options:
+  probes:
+    - environment
+    - npu
+    - gpu
+    - vpu
+    - rga
+  npu_loop_seconds: 10
+schema:
+  probes:
+    - list(environment|npu|gpu|vpu|rga)
+  npu_loop_seconds: int(0,120)
