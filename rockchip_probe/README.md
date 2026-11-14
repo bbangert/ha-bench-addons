@@ -4,9 +4,9 @@ Checks, from inside an app container, that the NPU, GPU and video codecs of a
 Rockchip RK3566 or RK3568 work with the userspace bundled in this image. Built
 for the Home Assistant Green (RK3566, vendor 6.1 kernel).
 
-**Test bench only.** The image bundles vendor binaries whose licences limit
-what they may be used for (see [Licences](#licences)). It has no Supervisor or
-Core API access.
+**Test bench only.** The image bundles unmodified vendor binaries (see
+[Licences](#licences)); this repository offers it for bench testing and
+nothing else. It has no Supervisor or Core API access.
 
 ## Running it
 
@@ -29,8 +29,17 @@ the app.
 
 Every probe reports `{name, status, detail, raw, started_at, finished_at}`
 with `status` one of `pass`, `fail`, `skipped` or `reported`. `summary.overall`
-is `fail` if any probe failed. Every subprocess has a timeout, so a wedged
-driver produces a failure, not a hung run.
+is `fail` if any probe failed, `pass` only if every selected `npu`, `gpu` and
+`vpu` probe passed and at least one of them ran, and `no gating probe ran` when
+none of those three was selected. Every subprocess has a timeout, so a wedged
+driver produces a failure, not a hung run. `/data/report.json` is rewritten
+with the `running` report at start and after each probe, so it never shows an
+earlier run. If the probe itself hits an unexpected error, the report ends with
+`"status": "error"` and the exception text.
+
+An unusable `options.json` (not an object, a non-list `probes`, a
+`npu_loop_seconds` that is not a finite number) falls back to the defaults;
+`option_notes` in the report says what was ignored and why.
 
 If `/proc/device-tree/compatible` does not name `rockchip,rk3566` or
 `rockchip,rk3568`, only `environment` runs, the others are `skipped`, and
@@ -41,9 +50,9 @@ If `/proc/device-tree/compatible` does not name `rockchip,rk3566` or
 | Probe | Pass when |
 |---|---|
 | `environment` | The device tree `compatible` and `model` are readable. Also inventories the device nodes (type, major:minor, mode, whether they open read-write), the kernel version and the versions of everything in the image. |
-| `npu` | The official rknn-toolkit-lite2 resnet18 example runs on the NPU and its TOP5 classes match the example's published result (`[812] space shuttle` first). Records the runtime and kernel driver versions (`0.9.8` is expected; another version is reported, not failed), then loops inference for `npu_loop_seconds` and records throughput. NPU load is sampled from `/proc/rknpu/load` or `/sys/kernel/debug/rknpu/load` if either is visible in the container, otherwise recorded as not available. |
-| `gpu` | `eglprobe` gets a GLES 3 context through the GBM platform on the `rockchip` DRM card, reports `OpenGL ES 3.x` and a `Mali-G52` renderer, completes an FBO and reads back the clear colour `255,0,0,255`. The surfaceless (`EGL_PLATFORM_SURFACELESS_MESA`) and default-display paths are tried and recorded too; with this libmali they are expected to fail and do not affect the result, which tells a consumer it has to use GBM. |
-| `vpu` | `mpi_dec_test` decodes the H.264 and H.265 test clips through a hardware HAL that MPP names in its log, producing the expected frame count with no error frames; `mpi_enc_test` produces a non-empty H.264 stream. `mpp_info_test` output is recorded. |
+| `npu` | The official rknn-toolkit-lite2 resnet18 example runs on the NPU and its TOP5 classes match the example's published result (`[812] space shuttle` first). Records the runtime and kernel driver versions (`0.9.8` is expected; another version is reported, not failed), then loops inference for `npu_loop_seconds` and records throughput; the loop fails the probe if it completes no inference or if the TOP1 class ever changes. NPU load is sampled from `/proc/rknpu/load` or `/sys/kernel/debug/rknpu/load` if either is visible in the container, otherwise recorded as not available. |
+| `gpu` | `eglprobe` gets a GLES 3 context through the GBM platform on the `rockchip` DRM card, reports `OpenGL ES 3.x` and a `Mali-G52` renderer, completes an FBO and reads back the clear colour `255,0,0,255`. The surfaceless (`EGL_PLATFORM_SURFACELESS_MESA`) and default-display (`eglGetDisplay(EGL_DEFAULT_DISPLAY)`) paths are tried and recorded with `"gating": false`; they never affect the result. On a Green, surfaceless failed and the default display worked; GBM is the path the probe relies on. |
+| `vpu` | `mpi_dec_test` decodes the H.264 and H.265 test clips through a hardware HAL that MPP names in its log, producing the expected frame count with no error frames; `mpi_enc_test` encodes exactly the 30 requested frames through a hardware HAL named in its log (on a Green, `hal_h264e_vepu541`) into a non-empty H.264 stream. `mpp_info_test` output is recorded. |
 | `rga` | Never gated (`reported`): whether `/dev/rga` is present and openable, and the driver version if visible. |
 
 ## Device access
@@ -77,12 +86,11 @@ that they are byte-identical to the upstream copies of the pinned inputs.
 
 ### Licences
 
-- **RKNN.** The v2.3.2 tag ships a Rockchip copyright statement that provides
-  the software "as is" without warranty and grants no further terms. Later
-  releases (v2.5.0) replace it with the RKNN SDK License, which permits use and
-  redistribution solely for the design, development and testing of
-  applications compatible with Rockchip products. This app exists for exactly
-  that kind of testing and should not be used for anything else.
+- **RKNN.** All RKNN files come from the v2.3.2 tag, whose `LICENSE` is a
+  Rockchip copyright statement: the software is provided "as is", without
+  warranty. It states no use restriction and no express grant to redistribute.
+  The files are redistributed here unmodified, without such a grant, for bench
+  testing.
 - **libmali.** Arm's end user licence permits distributing the whole of the
   software for use with Mali-based products, provided notices are kept and a
   copy of the licence accompanies it.
