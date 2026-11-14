@@ -8,6 +8,7 @@ stopped, so the app stays started and the result can be fetched headlessly.
 import datetime
 import glob
 import json
+import math
 import os
 import re
 import signal
@@ -24,6 +25,11 @@ PORT = 8000
 OUTPUT_LIMIT = 20000
 
 ALL_PROBES = ["environment", "npu", "gpu", "vpu", "rga"]
+# The accelerator checks. environment and rga alone prove nothing about them,
+# so a run without at least one of these passing cannot be "pass".
+GATING_PROBES = ("npu", "gpu", "vpu")
+DEFAULT_OPTIONS = {"probes": list(ALL_PROBES), "npu_loop_seconds": 10}
+ENCODE_FRAMES = 30
 SUPPORTED_SOCS = ("rockchip,rk3566", "rockchip,rk3568")
 
 # Mirrors `devices:` in config.yaml, plus the Rockchip CMA heap some kernels add.
@@ -258,6 +264,20 @@ def parse_load(text):
     return [int(v) for v in re.findall(r"(\d+)\s*%", text or "")]
 
 
+def npu_loop_problems(result, loop_seconds):
+    if loop_seconds <= 0:
+        return []
+    loop = result.get("loop")
+    if not loop:
+        return ["loop requested but did not complete"]
+    problems = []
+    if loop.get("inferences", 0) == 0:
+        problems.append("loop completed zero inferences")
+    if loop.get("top1_mismatches", 0) > 0:
+        problems.append(f"loop TOP1 changed in {loop['top1_mismatches']} of {loop.get('inferences')} inferences")
+    return problems
+
+
 def probe_npu(ctx):
     npu = os.path.join(ROOT, "npu")
     loop_seconds = ctx["options"]["npu_loop_seconds"]
@@ -314,6 +334,8 @@ def probe_npu(ctx):
         problems.append("no inference result")
     elif indices[0] != EXPECTED_TOP5[0] or set(indices) != set(EXPECTED_TOP5):
         problems.append(f"TOP5 {indices} != expected {EXPECTED_TOP5}")
+    if top:
+        problems += npu_loop_problems(result, loop_seconds)
 
     parts = []
     if top:
@@ -351,7 +373,7 @@ def probe_gpu(ctx):
 
     for mode in ("surfaceless", "default"):
         r = run([egl, mode], timeout=30)
-        raw["runs"][mode] = {"expected_to_fail": True, "ok": r["rc"] == 0, **keyvals(r.get("stdout", "")),
+        raw["runs"][mode] = {"gating": False, "ok": r["rc"] == 0, **keyvals(r.get("stdout", "")),
                              "process": r}
 
     card = next((n for n in cards if names.get(n) == "rockchip"), None)
@@ -415,6 +437,31 @@ def mpp_decode(path, codec, expected_frames):
     return check, ("; ".join([summary] + problems) if problems else summary)
 
 
+def encode_check(r, size, requested):
+    text = output_of(r)
+    # The bound encoder HAL is named in the mpp_enc_hal_debug "found api" line,
+    # or as the log tag ("mpp[pid]: hal_h264e_x: ...") of its own messages. The
+    # debug flag also logs every HAL merely registered ("api hal_... adding"),
+    # so a bare name anywhere in the text proves nothing.
+    hal = re.findall(r"found api (\S+) for coding \d+ client \d+", text)
+    hal = hal or sorted(set(re.findall(r"^\S+: (hal_h26[45]e_\w+): ", text, re.M)))
+    frames = re.search(r"encode (\d+) frames", text)
+    got = int(frames.group(1)) if frames else None
+    problems = []
+    if r["rc"] != 0:
+        problems.append(failure_of(r))
+    if size <= 0:
+        problems.append("empty output stream")
+    if got != requested:
+        problems.append(f"{'no' if got is None else got} frames encoded, expected {requested}")
+    if not hal:
+        problems.append("no encoder HAL bound")
+    check = {"codec": "h264", "bytes": size, "requested_frames": requested, "frames": got, "hal": hal,
+             "ok": not problems, "process": r}
+    summary = f"h264 encode {'?' if got is None else got}/{requested} frames, {size} bytes via {','.join(hal) or '?'}"
+    return check, "; ".join([summary] + problems)
+
+
 def probe_vpu(ctx):
     clips_dir = os.path.join(ROOT, "clips")
     clips = json.loads(read_text(os.path.join(clips_dir, "clips.json")) or "{}")
@@ -436,18 +483,12 @@ def probe_vpu(ctx):
     out = "/tmp/rockchip-probe-enc.h264"
     if os.path.exists(out):
         os.unlink(out)
-    r = run(["/usr/local/bin/mpi_enc_test", "-t", "7", "-w", "1280", "-h", "720", "-n", "30", "-o", out],
-            timeout=60, env={"mpp_enc_hal_debug": "2", "mpp_debug": "16"})
-    text = output_of(r)
+    r = run(["/usr/local/bin/mpi_enc_test", "-t", "7", "-w", "1280", "-h", "720", "-n", str(ENCODE_FRAMES),
+             "-o", out], timeout=60, env={"mpp_enc_hal_debug": "2", "mpp_debug": "16"})
     size = os.path.getsize(out) if os.path.exists(out) else 0
-    api = re.findall(r"found api (\S+) for coding \d+ client (\d+)", text)
-    frames = re.search(r"encode (\d+) frames", text)
-    enc_ok = r["rc"] == 0 and size > 0
-    raw["encode"] = {"codec": "h264", "bytes": size, "frames": int(frames.group(1)) if frames else None,
-                     "hal": [a[0] for a in api], "ok": enc_ok, "process": r}
-    enc_summary = f"h264 encode {size} bytes via {','.join(raw['encode']['hal']) or '?'}"
-    parts.append(enc_summary if enc_ok else f"{enc_summary}; {failure_of(r)}")
-    ok &= enc_ok
+    raw["encode"], enc_summary = encode_check(r, size, ENCODE_FRAMES)
+    parts.append(enc_summary)
+    ok &= raw["encode"]["ok"]
 
     if not clips:
         ok = False
@@ -488,23 +529,53 @@ def run_probe(name, ctx):
             "seconds": round(time.monotonic() - t0, 2), "raw": raw}
 
 
-def load_options():
-    opts = {"probes": list(ALL_PROBES), "npu_loop_seconds": 10}
+def parse_options(text):
+    """Never raises: anything unusable falls back to the default, with a note saying why."""
+    opts = json.loads(json.dumps(DEFAULT_OPTIONS))
     notes = []
     try:
-        with open(os.path.join(DATA, "options.json")) as f:
-            given = json.load(f)
-    except (OSError, ValueError) as e:
-        given = {}
-        notes.append(f"options.json not used: {e}")
-    if isinstance(given.get("probes"), list):
-        unknown = [p for p in given["probes"] if p not in ALL_PROBES]
+        given = json.loads(text)
+    except ValueError as e:
+        return opts, [f"options.json not used: {e}"]
+    if not isinstance(given, dict):
+        return opts, [f"options.json not used: top level is {type(given).__name__}, not an object"]
+
+    probes = given.get("probes", opts["probes"])
+    if isinstance(probes, list):
+        unknown = [p for p in probes if p not in ALL_PROBES]
         if unknown:
-            notes.append(f"ignored unknown probes {unknown}")
-        opts["probes"] = [p for p in ALL_PROBES if p in given["probes"]]
-    if isinstance(given.get("npu_loop_seconds"), (int, float)):
-        opts["npu_loop_seconds"] = max(0, min(120, int(given["npu_loop_seconds"])))
+            notes.append(f"ignored unknown probes {unknown!r}")
+        opts["probes"] = [p for p in ALL_PROBES if p in probes]
+    else:
+        notes.append(f"probes {probes!r} is not a list; using the default")
+
+    seconds = given.get("npu_loop_seconds", opts["npu_loop_seconds"])
+    # bool is an int subclass and NaN/inf are floats; neither is a duration.
+    if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and math.isfinite(seconds):
+        opts["npu_loop_seconds"] = max(0, min(120, int(seconds)))
+    else:
+        notes.append(f"npu_loop_seconds {seconds!r} is not a finite number; using the default")
     return opts, notes
+
+
+def load_options():
+    try:
+        with open(os.path.join(DATA, "options.json")) as f:
+            text = f.read()
+    except (OSError, UnicodeDecodeError) as e:
+        return json.loads(json.dumps(DEFAULT_OPTIONS)), [f"options.json not used: {e}"]
+    return parse_options(text)
+
+
+def overall_status(probes, unsupported):
+    if unsupported:
+        return "unsupported SoC"
+    if any(p["status"] == "fail" for p in probes):
+        return "fail"
+    gating = [p for p in probes if p["name"] in GATING_PROBES]
+    if not gating:
+        return "no gating probe ran"
+    return "pass" if all(p["status"] == "pass" for p in gating) else "fail"
 
 
 def write_report(report):
@@ -544,25 +615,21 @@ class Handler(BaseHTTPRequestHandler):
         log("http " + fmt % args)
 
 
-def main():
-    # PID 1 ignores signals that have no handler, so `stop` would wait for the kill timeout.
-    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
-    signal.signal(signal.SIGINT, lambda *_: os._exit(0))
+def publish():
+    """Snapshots the live report to disk, so the file never shows an earlier run's result."""
+    with REPORT_LOCK:
+        snapshot = json.loads(json.dumps(REPORT))
+    return snapshot, write_report(snapshot)
 
-    server = ThreadingHTTPServer(("", PORT), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    log(f"serving the report on :{PORT}")
 
+def run_all():
     options, notes = load_options()
     soc = soc_info()
     forced = os.environ.get("ROCKCHIP_PROBE_IGNORE_SOC") == "1"
-    started = now()
     t0 = time.monotonic()
-    report = {"app": "rockchip_probe", "version": app_version(), "status": "running", "started_at": started,
-              "options": options, "option_notes": notes, "soc": {**soc, "check_ignored": forced}, "probes": []}
     with REPORT_LOCK:
-        REPORT.clear()
-        REPORT.update(report)
+        REPORT.update({"options": options, "option_notes": notes, "soc": {**soc, "check_ignored": forced}})
+    publish()
 
     ctx = {"options": options, "soc": soc}
     unsupported = not soc["supported"] and not forced
@@ -575,16 +642,42 @@ def main():
             result = run_probe(name, ctx)
         with REPORT_LOCK:
             REPORT["probes"].append(result)
+        publish()
 
-    counts = {s: sum(1 for p in REPORT["probes"] if p["status"] == s)
-              for s in ("pass", "fail", "skipped", "reported")}
-    overall = "unsupported SoC" if unsupported else ("fail" if counts["fail"] else "pass")
     with REPORT_LOCK:
+        counts = {s: sum(1 for p in REPORT["probes"] if p["status"] == s)
+                  for s in ("pass", "fail", "skipped", "reported")}
+        overall = overall_status(REPORT["probes"], unsupported)
         REPORT.update({"status": "done", "finished_at": now(), "seconds": round(time.monotonic() - t0, 2),
                        "summary": {"overall": overall, **counts, **({"reason": reason} if unsupported else {})}})
-        final = json.loads(json.dumps(REPORT))
-    path = write_report(final)
-    log(f"done: {overall} {counts}; report at {path} and http://<host>:<mapped port>/report.json")
+    return overall, counts
+
+
+def main():
+    # PID 1 ignores signals that have no handler, so `stop` would wait for the kill timeout.
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    signal.signal(signal.SIGINT, lambda *_: os._exit(0))
+
+    with REPORT_LOCK:
+        REPORT.clear()
+        REPORT.update({"app": "rockchip_probe", "version": app_version(), "status": "running",
+                       "started_at": now(), "probes": []})
+    # Replace any report a previous run left in /data before anything can fail.
+    publish()
+
+    server = ThreadingHTTPServer(("", PORT), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log(f"serving the report on :{PORT}")
+
+    try:
+        overall, counts = run_all()
+        log(f"done: {overall} {counts}")
+    except Exception as e:  # end in a served report, never a dead container stuck at "running"
+        with REPORT_LOCK:
+            REPORT.update({"status": "error", "error": repr(e), "finished_at": now()})
+        log(f"error: {e!r}")
+    final, path = publish()
+    log(f"report at {path} and http://<host>:<mapped port>/report.json")
     print(json.dumps(final), flush=True)
 
     while True:
