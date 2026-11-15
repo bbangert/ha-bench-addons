@@ -54,7 +54,7 @@ If `/proc/device-tree/compatible` does not name `rockchip,rk3566` or
 | `npu` | The official rknn-toolkit-lite2 resnet18 example runs on the NPU and its TOP5 classes match the example's published result (`[812] space shuttle` first). Records the runtime and kernel driver versions (`0.9.8` is expected; another version is reported, not failed), then loops inference for `npu_loop_seconds` and records throughput; the loop fails the probe if it completes no inference or if the TOP1 class ever changes. NPU load is sampled from `/proc/rknpu/load` or `/sys/kernel/debug/rknpu/load` if either is visible in the container, otherwise recorded as not available. |
 | `gpu` | `eglprobe` gets a GLES 3 context through the GBM platform on the `rockchip` DRM card, reports `OpenGL ES 3.x` and a `Mali-G52` renderer, completes an FBO and reads back the clear colour `255,0,0,255`. The surfaceless (`EGL_PLATFORM_SURFACELESS_MESA`) and default-display (`eglGetDisplay(EGL_DEFAULT_DISPLAY)`) paths are tried and recorded with `"gating": false`; they never affect the result. On a Green, surfaceless failed and the default display worked; GBM is the path the probe relies on. |
 | `vpu` | `mpi_dec_test` decodes the H.264 and H.265 test clips through a hardware HAL that MPP names in its log, producing the expected frame count with no error frames; `mpi_enc_test` encodes exactly the 30 requested frames through a hardware HAL named in its log (on a Green, `hal_h264e_vepu541`) into a non-empty H.264 stream. `mpp_info_test` output is recorded. |
-| `rga` | `rgaprobe` (below) reads the library and driver versions and runs copy, resize, colour conversion, the letterbox, crop+rotate+flip and fill, each checked against a CPU reference. Passes when the version is readable and every case passes with both plain user-memory buffers and dma-bufs from `/dev/dma_heap/system`. |
+| `rga` | `rgaprobe` (below) reads the library and driver versions and runs copy, resize, colour conversion, the letterbox, crop+rotate+flip and fill, each checked against a CPU reference. Passes when the version is readable, every case passes with dma-bufs from `/dev/dma_heap/system`, and the 500-job stress run has no failures and one output checksum. |
 
 ### RGA
 
@@ -69,21 +69,42 @@ line per result:
 | `version`, `capabilities` | `querystring(RGA_VERSION)` must be readable; `RGA_ALL` (limits, formats, scale range) is recorded |
 | `copy` | RGBA 1280x720 copy, byte-exact |
 | `resize-nv12`, `resize-rgba` | NV12 1920x1080 to 640x360, RGBA 1920x1080 to 640x640; mean absolute error at most 6 against the closest of a bilinear, area and nearest CPU reference (MAE and max error recorded) |
-| `cvtcolor` | NV12 to RGB888 at 1280x720 in BT.601 limited and full range; passes if either matches its CPU reference within MAE 3, and says which |
-| `letterbox` | NV12 1920x1080 to a 640x640 RGB888 detector input: 640x360 content at y=140, pad 114 written by `imfill` and required exact, content within MAE 6 |
+| `cvtcolor-bt601-limited`, `cvtcolor-bt601-full` | NV12 to RGB888 at 1280x720 with the colour range requested explicitly; the output must be within MAE 3 of the CPU reference for the requested range and closer to it than to the other range |
+| `letterbox-bt601-limited`, `letterbox-bt601-full` | NV12 1920x1080 to a 640x640 RGB888 detector input, range requested explicitly: 640x360 content at y=140 within MAE 6 of the requested range (and closer to it than to the other), and the pad, written by `imfill`, exactly 114,114,114; content MAE and wrong pad bytes are reported separately |
 | `crop-rotate-flip` | a 320x240 crop rotated 90° and flipped in one job, byte-exact |
-| `fill` | `imfill` of a rect: uniform inside, nothing changed outside |
+| `fill` | `imfill` of an RGBA rect: uniform inside, nothing changed outside; reports the byte order the colour lands in |
+| `fill-rgb888` | the same on RGB888; reports which three bytes of the 32-bit colour land in memory |
 | `cpu-letterbox` | the same letterbox on the CPU (the tool's plain reference code), for scale |
-| `stress` | 500 consecutive letterbox jobs on dma-heap buffers; records failures and how many distinct output checksums appeared (one is expected); reported, not gated |
+| `stress` | 500 consecutive letterbox jobs on dma-heap `system` buffers; gates on no failed job and exactly one distinct output checksum |
 
 The input is a structured pattern (gradients, colour bars, hard lines and a
 checker block), not noise, so a wrong kernel, offset or channel order stands
 out. Each case runs once to be checked, then 50 more times for mean/min/max
-timing. All cases run for every buffer type: user memory (`va`) and dma-bufs
-from `system`, `system-uncached`, `reserved` and `rk-dma-heap-cma`. Only `va`
-and `system` gate; the others are reported per heap. RGA2 addresses only
-memory below 4 GiB; the probe reports per buffer type whether a job was
-accepted, and keeps librga's own error text verbatim in `raw.librga_log`.
+timing. All cases run for every buffer type: dma-bufs from `system`,
+`system-uncached`, `reserved` and `rk-dma-heap-cma`, user memory imported with
+`importbuffer_virtualaddr` (`va`), and user memory passed per job with
+`wrapbuffer_virtualaddr` (`va-wrap`). Only `system` gates; the others are
+reported per buffer type. RGA2 addresses only memory below 4 GiB; the probe
+reports per buffer type whether a job was accepted, and keeps librga's own
+error text verbatim in `raw.librga_log`.
+
+The pad colour is 114 in all four bytes of `imfill`'s colour argument. librga
+and the driver hand that value to the hardware register unchanged, and which
+byte lands in which channel depends on the output format (on RGBA the low byte
+is R), so a uniform value is the only packing that is grey on every format.
+
+On a Green, every dma-heap buffer type was accepted and user memory imported
+with `importbuffer_virtualaddr` was not. Reading the driver, the per-job
+`va-wrap` path reaches the same mapping code, so it is expected to be refused
+too; the report shows whether it is.
+The vendor kernel's RGA driver (multi-RGA 1.3.13) treats RK356x's RGA2 as a
+core with its own page-table MMU and no IOMMU, maps user memory through the
+DMA API without an IOMMU, and then refuses any mapping that comes back as more
+than one segment (`dma_map_sg mapped more than one segment`), which is every
+user buffer that is not physically contiguous. dma-bufs take a different path
+that accepts scattered pages. No device-tree or kernel-config option changes
+this, so consumers on this kernel should hand RGA dma-buf fds, such as dma-heap
+allocations or the decoder's own frame buffers.
 `rgaprobe --selftest` checks the pattern generator and CPU references without
 RGA, and runs during the image build.
 
