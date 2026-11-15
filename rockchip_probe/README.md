@@ -44,7 +44,8 @@ goes to a temporary name and is kept only if its sha256 matches; nothing is
 imported or loaded before that. Files are kept in `/data/rknn` and re-checked
 on every start; a file that fails the check is deleted and fetched again. The
 wheel is unzipped (never pip-installed, with a path-traversal check) into
-`/data/rknn/site-<hash>`, and the image's `/usr/lib/librknnrt.so` is a symlink
+`/data/rknn/site-<hash>`, rebuilt from the verified wheel on every start
+rather than trusting an earlier tree, and the image's `/usr/lib/librknnrt.so` is a symlink
 that resolves into the verified copy. Downloads retry with backoff and share a
 120-second deadline. If `/data` is not writable the files go to a temporary
 directory for that run, and the report says so. If `/data` is mounted

@@ -126,18 +126,26 @@ def safe_extract(zip_path, dest):
         z.extractall(root)
 
 
-# Keyed by the wheel's hash, so a different wheel never reuses an old tree.
+# Only the wheel's hash is checked, so an extracted tree from an earlier start
+# is never trusted: it is rebuilt from the verified wheel every time, and any
+# other site-* tree is removed.
 def unpack_wheel(wheel, sha, directory):
     target = os.path.join(directory, f"site-{sha[:16]}")
-    if os.path.isfile(os.path.join(target, ".complete")):
-        return target, "cached"
     tmp = f"{target}.part-{os.getpid()}"
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp)
     safe_extract(wheel, tmp)
-    open(os.path.join(tmp, ".complete"), "w").close()
-    shutil.rmtree(target, ignore_errors=True)
+    old = f"{target}.old-{os.getpid()}"
+    if os.path.lexists(target):
+        os.rename(target, old)
     os.rename(tmp, target)
+    for name in os.listdir(directory):
+        path = os.path.join(directory, name)
+        if name.startswith("site-") and path != target:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.unlink(path)
     return target, "unpacked"
 
 
