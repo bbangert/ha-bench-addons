@@ -45,12 +45,13 @@ exposes a remote eval endpoint. Bench only.
 Rockchip RK3566/RK3568 board (built for the Home Assistant Green) that runs an
 NPU inference, a headless GLES render, hardware H.264/H.265 decode and H.264
 encode, and RGA scaling and colour conversion, then serves a JSON report on
-port 4010. Its image bundles Rockchip's RKNN runtime, Arm's Mali userspace
-driver, Rockchip's MPP and librga, each
-pinned by hash and shipped with its licence text. The RKNN files are
-redistributed unmodified, without an express redistribution grant (their
-v2.3.2 licence is an as-is copyright statement), so the app is offered for a
-test bench only. It is published by
+port 4010. Its image bundles Arm's Mali userspace driver and Rockchip's MPP and
+librga, each pinned by hash and shipped with its licence text. Rockchip's RKNN
+runtime and example are not redistributed by this repository or the image: the
+app downloads them from the upstream repository at first start, pinned by
+hash, so the first start needs internet access. They come under Rockchip's
+terms, which at the pinned tag are an as-is copyright statement. The app is
+offered for a test bench only. It is published by
 `.github/workflows/publish-rockchip-probe.yml`. See
 [its README](rockchip_probe/README.md).
 

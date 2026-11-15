@@ -5,9 +5,13 @@ Checks, from inside an app container, that the NPU, GPU, video codecs and RGA
 Rockchip RK3566 or RK3568 work with the userspace bundled in this image. Built
 for the Home Assistant Green (RK3566, vendor 6.1 kernel).
 
-**Test bench only.** The image bundles unmodified vendor binaries (see
+**Test bench only.** The image bundles Arm's Mali userspace driver, and the
+app downloads Rockchip's RKNN runtime and example at first start (see
 [Licences](#licences)); this repository offers it for bench testing and
 nothing else. It has no Supervisor or Core API access.
+
+**The first start needs internet access** (to `raw.githubusercontent.com`),
+unless `/data/rknn` is already seeded; see [RKNN files](#rknn-files).
 
 ## Running it
 
@@ -27,6 +31,31 @@ the app.
 |---|---|---|
 | `probes` | all five | Which of `environment`, `npu`, `gpu`, `vpu`, `rga` to run |
 | `npu_loop_seconds` | `10` | How long the NPU inference loop runs (0–120; 0 skips the loop) |
+| `rknn_fetch` | `true` | Download missing RKNN files at start; `false` uses only what is already in `/data/rknn` |
+
+### RKNN files
+
+The image does not contain Rockchip's RKNN files. When the `npu` probe is
+selected, the app downloads them on start from the pinned upstream URLs in
+[`RUNTIME_SOURCES`](RUNTIME_SOURCES) (airockchip/rknn-toolkit2 at commit
+`42aa1d4`, the v2.3.2 tag): `librknnrt.so`, the rknn-toolkit-lite2 cp311
+wheel, and the resnet18 example's model, test image and labels. Each download
+goes to a temporary name and is kept only if its sha256 matches; nothing is
+imported or loaded before that. Files are kept in `/data/rknn` and re-checked
+on every start; a file that fails the check is deleted and fetched again. The
+wheel is unzipped (never pip-installed, with a path-traversal check) into
+`/data/rknn/site-<hash>`, and the image's `/usr/lib/librknnrt.so` is a symlink
+that resolves into the verified copy. Downloads retry with backoff and share a
+120-second deadline. If `/data` is not writable the files go to a temporary
+directory for that run, and the report says so.
+
+The report lists every file with its URL, expected sha256 and whether it was
+`cached`, `downloaded` or `failed` (with the error), plus the fetch time. A
+self-check after the fetch imports `rknnlite`, loads the runtime and confirms
+the decoded test image is the one the official example feeds the model. If
+any file is missing, the `npu` probe fails with `RKNN files not available: …`
+and the other probes run as usual. To run offline, copy the five files into
+`/data/rknn` and set `rknn_fetch: false`.
 
 Every probe reports `{name, status, detail, raw, started_at, finished_at}`
 with `status` one of `pass`, `fail`, `skipped` or `reported`. `summary.overall`
@@ -130,11 +159,10 @@ same version; a kernel that moves to another DDK needs a matching blob here.
 Debian 12 (bookworm) slim, pinned by digest, with Python 3.11, NumPy, Pillow,
 psutil, ruamel.yaml and libdrm from Debian. Everything else is listed in
 [`SOURCES`](SOURCES), pinned by commit or tag and sha256; the build fails on
-any mismatch.
+any mismatch. The RKNN files are not in the image (see [RKNN files](#rknn-files)).
 
 | Component | Version | Source | Licence |
 |---|---|---|---|
-| `librknnrt.so`, rknn-toolkit-lite2 (cp311 wheel), resnet18 example model, image and labels | 2.3.2 | [airockchip/rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2/tree/v2.3.2) @ `42aa1d4` | Rockchip, [`licenses/rknn-toolkit2-LICENSE.txt`](licenses/rknn-toolkit2-LICENSE.txt) |
 | `libmali-bifrost-g52-g29p1-gles.so` (EGL, GLES, GBM) | g29p1-12eac0 | [JeffyCN/mirrors](https://github.com/JeffyCN/mirrors/tree/bf621d15f009509557d6b28f81427651695cac20) branch `libmali-next` @ `bf621d1` | Arm EULA, [`licenses/libmali-END_USER_LICENCE_AGREEMENT.txt`](licenses/libmali-END_USER_LICENCE_AGREEMENT.txt) |
 | MPP (`librockchip_mpp`, `mpp_info_test`, `mpi_dec_test`, `mpi_enc_test`), built from source | 1.1.0 | [rockchip-linux/mpp](https://github.com/rockchip-linux/mpp/tree/1.1.0) @ `c08762e` | Apache-2.0 or MIT, [`licenses/`](licenses/) |
 | librga (`librga.so`, im2d API), built from source | API 1.10.5_[11] | [JeffyCN/mirrors](https://github.com/JeffyCN/mirrors/tree/57a1067a246c71fa6c9a355d1668884fda155dd5) branch `linux-rga-multi` @ `57a1067` | Apache-2.0, [`licenses/librga-COPYING.txt`](licenses/librga-COPYING.txt); bundled libdrm header notices in [`licenses/librga-libdrm-headers-NOTICE.txt`](licenses/librga-libdrm-headers-NOTICE.txt) |
@@ -146,11 +174,13 @@ that they are byte-identical to the upstream copies of the pinned inputs.
 
 ### Licences
 
-- **RKNN.** All RKNN files come from the v2.3.2 tag, whose `LICENSE` is a
-  Rockchip copyright statement: the software is provided "as is", without
-  warranty. It states no use restriction and no express grant to redistribute.
-  The files are redistributed here unmodified, without such a grant, for bench
-  testing.
+- **RKNN.** Neither this repository nor the image redistributes the RKNN
+  files; the app downloads them from the upstream repository at first start.
+  They come under Rockchip's terms, which at the v2.3.2 tag are a copyright
+  statement providing the software "as is", without warranty. That text is
+  kept for reference in
+  [`licenses-downloaded/rknn-toolkit2-LICENSE.txt`](licenses-downloaded/rknn-toolkit2-LICENSE.txt)
+  and applies to the downloaded files only; it is not in the image.
 - **libmali.** Arm's end user licence permits distributing the whole of the
   software for use with Mali-based products, provided notices are kept and a
   copy of the licence accompanies it.
@@ -175,6 +205,7 @@ podman run --rm -p 4010:8000 \
   --device /dev/dma_heap/system --device /dev/dma_heap/system-uncached \
   --security-opt unmask=/sys/firmware \
   --mount type=bind,src=/sys/firmware/devicetree/base,dst=/device-tree,ro \
+  -v /var/lib/rockchip-probe-data:/data \
   ghcr.io/bbangert/ha-bench-addons/aarch64-rockchip-probe:0.1.0
 ```
 
