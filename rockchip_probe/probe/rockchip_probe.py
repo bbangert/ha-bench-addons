@@ -28,9 +28,12 @@ ALL_PROBES = ["environment", "npu", "gpu", "vpu", "rga"]
 # The accelerator checks. environment alone proves nothing about them, so a
 # run without at least one of these passing cannot be "pass".
 GATING_PROBES = ("npu", "gpu", "vpu", "rga")
-RGA_CASES = ("copy", "resize-nv12", "resize-rgba", "cvtcolor", "letterbox", "crop-rotate-flip", "fill")
-# A failed job on these fails the probe; the other heaps are reported per heap.
-RGA_GATING_BUFFERS = ("va", "system")
+RGA_CASES = ("copy", "resize-nv12", "resize-rgba", "cvtcolor-bt601-limited", "cvtcolor-bt601-full",
+             "letterbox-bt601-limited", "letterbox-bt601-full", "crop-rotate-flip", "fill", "fill-rgb888")
+# Only dma-heap system buffers gate. The vendor RGA2 driver rejects user memory
+# that is not physically contiguous, so va/va-wrap are reported like the other
+# heaps (see the README).
+RGA_GATING_BUFFERS = ("system",)
 DEFAULT_OPTIONS = {"probes": list(ALL_PROBES), "npu_loop_seconds": 10}
 ENCODE_FRAMES = 30
 SUPPORTED_SOCS = ("rockchip,rk3566", "rockchip,rk3568")
@@ -513,10 +516,10 @@ def parse_rgaprobe(text):
         head, _, detail = line.partition(" detail=")
         entry = dict(kv.split("=", 1) for kv in head.split() if "=" in kv)
         entry["ok"] = entry.get("ok") == "1"
-        for k in ("ms", "min", "max", "mae"):
+        for k in ("ms", "min", "max", "mae", "content_mae", "other_range_mae"):
             if k in entry:
                 entry[k] = float(entry[k])
-        for k in ("n", "maxerr", "jobs", "failures", "checksums"):
+        for k in ("n", "maxerr", "content_maxerr", "pad_bad", "jobs", "failures", "checksums"):
             if k in entry:
                 entry[k] = int(entry[k])
         entry["detail"] = detail
@@ -542,6 +545,12 @@ def rga_verdict(results):
             for c in failed:
                 reasons.setdefault(by[(c, buf)]["detail"] if (c, buf) in by else "no result", []).append(c)
             problems.append(f"{buf} buffers: " + "; ".join(f"{', '.join(cs)} ({why})" for why, cs in reasons.items()))
+    stress = by.get(("stress", "system"))
+    if not stress:
+        problems.append("no stress result")
+    elif not stress["ok"]:
+        problems.append(f"stress: {stress.get('failures')} failed jobs, {stress.get('checksums')} distinct checksums"
+                        f" ({stress['detail']})")
     return problems, summary
 
 
@@ -568,9 +577,10 @@ def probe_rga(ctx):
     parts = []
     if (v := by.get(("version", "-"))) and v["ok"]:
         parts.append(f"version {v['detail']}")
-    head = by.get(("letterbox", "system"))
+    head = by.get(("letterbox-bt601-limited", "system"))
     if head and head["ok"]:
-        parts.append(f"letterbox on system heap {head.get('ms')} ms (mae {head.get('mae')}, {head.get('matched')})")
+        parts.append(f"bt601-limited letterbox on system heap {head.get('ms')} ms "
+                     f"(content mae {head.get('content_mae')}, pad errors {head.get('pad_bad')})")
     if cpu := by.get(("cpu-letterbox", "cpu")):
         parts.append(f"CPU reference letterbox {cpu.get('ms')} ms")
     if stress := by.get(("stress", "system")):
