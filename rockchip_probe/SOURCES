@@ -10,3 +10,4 @@ rknn-toolkit2-license 2.3.2 d846f57d942c7dfdca7b8b54f9e8bb39e1e226790dc4f5ee205d
 libmali g29p1-12eac0 02d42b4a49007d8b99865653105783034df9adbd502ccef035038a0c3756c027 libmali-bifrost-g52-g29p1-gles.so https://raw.githubusercontent.com/JeffyCN/mirrors/bf621d15f009509557d6b28f81427651695cac20/lib/aarch64-linux-gnu/libmali-bifrost-g52-g29p1-gles.so
 libmali-license g29p1-12eac0 a78acc73de9909efb879800d4daa4640c4aaa55cd751238a133954aba15e4285 libmali-END_USER_LICENCE_AGREEMENT.txt https://raw.githubusercontent.com/JeffyCN/mirrors/bf621d15f009509557d6b28f81427651695cac20/END_USER_LICENCE_AGREEMENT.txt
 mpp 1.1.0 82da3d7ea5926021d48fcaf56cde2e6cb39c3eaad11e06f3cf2a9bfbb3133852 mpp.tar.gz https://github.com/rockchip-linux/mpp/archive/c08762ebfadeb4e986d2fed993bc7a54862d3ebe.tar.gz
+librga 1.10.5_[11] c539db8a4059d13975e12f596fbe6fd0ba818288cc067300c5e00f3a9f0442e0 librga.tar.gz https://github.com/JeffyCN/mirrors/archive/57a1067a246c71fa6c9a355d1668884fda155dd5.tar.gz

@@ -23,20 +23,37 @@ RUN set -eu; \
     cmp rknn-toolkit2-LICENSE.txt licenses-repo/rknn-toolkit2-LICENSE.txt; \
     cmp libmali-END_USER_LICENCE_AGREEMENT.txt licenses-repo/libmali-END_USER_LICENCE_AGREEMENT.txt; \
     cmp mpp/LICENSES/Apache-2.0 licenses-repo/mpp-Apache-2.0.txt; \
-    cmp mpp/LICENSES/MIT licenses-repo/mpp-MIT.txt
+    cmp mpp/LICENSES/MIT licenses-repo/mpp-MIT.txt; \
+    mkdir librga && tar -xzf librga.tar.gz -C librga --strip-components=1; \
+    cmp librga/COPYING licenses-repo/librga-COPYING.txt; \
+    for f in drm_fourcc.h drm_mode.h; do \
+      echo "core/3rdparty/libdrm/include/drm/$f:"; \
+      awk '/\*\//{print; exit} {print}' "librga/core/3rdparty/libdrm/include/drm/$f"; \
+      echo; \
+    done > librga-drm-notice.txt; \
+    cmp librga-drm-notice.txt licenses-repo/librga-libdrm-headers-NOTICE.txt
 
 FROM ${DEBIAN} AS build
 # Debian's Khronos/GBM headers are only for compiling eglprobe; the binary is
 # linked against the libmali blob, which exports EGL, GLES and GBM itself.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      build-essential cmake pkg-config libdrm-dev libegl-dev libgles-dev libgbm-dev \
+      build-essential cmake meson ninja-build pkg-config libdrm-dev libegl-dev libgles-dev libgbm-dev \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=fetch /src/mpp /build/mpp
 RUN cmake -S /build/mpp -B /build/mpp-out -DCMAKE_BUILD_TYPE=Release -DBUILD_TEST=ON \
       -DCMAKE_INSTALL_PREFIX=/usr/local \
  && cmake --build /build/mpp-out -j"$(nproc)" \
- && DESTDIR=/out cmake --install /build/mpp-out \
+ && DESTDIR=/out cmake --install /build/mpp-out
+# librga from source rather than airockchip/librga's prebuilt .so, so the binary
+# is exactly the Apache-2.0 source it claims to be.
+COPY --from=fetch /src/librga /build/librga
+RUN meson setup /build/rga-out /build/librga --buildtype=release --prefix=/usr/local --libdir=lib \
+ && ninja -C /build/rga-out \
+ && DESTDIR=/out meson install -C /build/rga-out
+COPY rgaprobe.cpp /build/
+RUN g++ -std=c++17 -O2 -Wall -Wextra -o /out/usr/local/bin/rgaprobe /build/rgaprobe.cpp \
+      -I/out/usr/local/include/rga -L/out/usr/local/lib -lrga \
  && rm -rf /out/usr/local/include /out/usr/local/lib/pkgconfig /out/usr/local/lib/*.a
 COPY --from=fetch /src/libmali-bifrost-g52-g29p1-gles.so /build/mali/
 COPY eglprobe.c /build/
@@ -86,7 +103,7 @@ RUN cd /usr/lib/aarch64-linux-gnu \
 
 COPY --from=build /out/usr/local/lib/ /usr/local/lib/
 COPY --from=build /out/usr/local/bin/mpp_info_test /out/usr/local/bin/mpi_dec_test \
-     /out/usr/local/bin/mpi_enc_test /out/usr/local/bin/eglprobe /usr/local/bin/
+     /out/usr/local/bin/mpi_enc_test /out/usr/local/bin/eglprobe /out/usr/local/bin/rgaprobe /usr/local/bin/
 RUN ldconfig
 
 COPY --from=clips /clips /opt/rockchip-probe/clips
@@ -101,10 +118,11 @@ COPY probe/ /opt/rockchip-probe/
 # (it decodes with OpenCV; this image uses Pillow).
 RUN set -eu; \
     for f in /usr/local/bin/eglprobe /usr/local/bin/mpp_info_test /usr/local/bin/mpi_dec_test \
-             /usr/local/bin/mpi_enc_test /usr/lib/librknnrt.so; do \
+             /usr/local/bin/mpi_enc_test /usr/local/bin/rgaprobe /usr/lib/librknnrt.so; do \
       if ldd "$f" | grep -q 'not found'; then ldd "$f"; exit 1; fi; \
     done; \
     python3 -c 'import rknnlite.api'; \
+    rgaprobe --selftest; \
     python3 /opt/rockchip-probe/npu_worker.py --check-input /opt/rockchip-probe/npu/space_shuttle_224.jpg
 
 EXPOSE 8000
