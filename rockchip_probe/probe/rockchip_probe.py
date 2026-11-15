@@ -733,6 +733,22 @@ def run_probe(name, ctx):
             "seconds": round(time.monotonic() - t0, 2), "raw": bound_for_report(raw)}
 
 
+def clamp_seconds(value, low, high, default):
+    """Returns (seconds, note); never raises, whatever JSON produced."""
+    shown = repr(value) if len(repr(value)) <= 40 else repr(value)[:37] + "..."
+    # bool is an int subclass and NaN/inf are floats; none is a duration.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default, f"{shown} is not a number; using the default {default}"
+    if isinstance(value, float) and math.isnan(value):
+        return default, f"{shown} is not a number; using the default {default}"
+    # Compare before converting: int(1e308) is fine, but a 400-digit int
+    # cannot become a float, and min/max on Python ints never overflow.
+    if value < low or value > high:
+        clamped = low if value < low else high
+        return clamped, f"{shown} is outside {low}-{high}; clamped to {clamped}"
+    return int(value), None
+
+
 def parse_options(text):
     """Never raises: anything unusable falls back to the default, with a note saying why."""
     opts = json.loads(json.dumps(DEFAULT_OPTIONS))
@@ -754,11 +770,10 @@ def parse_options(text):
         notes.append(f"probes {probes!r} is not a list; using the default")
 
     seconds = given.get("npu_loop_seconds", opts["npu_loop_seconds"])
-    # bool is an int subclass and NaN/inf are floats; neither is a duration.
-    if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and math.isfinite(seconds):
-        opts["npu_loop_seconds"] = max(0, min(120, int(seconds)))
-    else:
-        notes.append(f"npu_loop_seconds {seconds!r} is not a finite number; using the default")
+    value, note = clamp_seconds(seconds, 0, 120, opts["npu_loop_seconds"])
+    opts["npu_loop_seconds"] = value
+    if note:
+        notes.append(f"npu_loop_seconds {note}")
 
     fetch = given.get("rknn_fetch", opts["rknn_fetch"])
     if isinstance(fetch, bool):

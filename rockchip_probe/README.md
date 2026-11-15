@@ -75,8 +75,9 @@ earlier run. If the probe itself hits an unexpected error, the report ends with
 `"status": "error"` and the exception text.
 
 An unusable `options.json` (not an object, a non-list `probes`, a
-`npu_loop_seconds` that is not a finite number) falls back to the defaults;
-`option_notes` in the report says what was ignored and why.
+`npu_loop_seconds` that is not a number) falls back to the defaults, and a
+`npu_loop_seconds` outside 0–120, however large, is clamped; `option_notes` in
+the report says what was ignored or clamped and why.
 
 If `/proc/device-tree/compatible` does not name `rockchip,rk3566` or
 `rockchip,rk3568`, only `environment` runs, the others are `skipped`, and
