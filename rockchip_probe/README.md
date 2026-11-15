@@ -152,8 +152,12 @@ RGA, and runs during the image build.
 
 ## Device access
 
-`config.yaml` asks for `devicetree: true`, because MPP selects its codec table
-by reading `/proc/device-tree/compatible`, and lists the DRM card and render
+`config.yaml` asks for `devicetree: true`. The probe's own SoC check reads
+`/proc/device-tree/compatible` or, failing that, `/device-tree/compatible`, but
+MPP reads only `/proc/device-tree/compatible` and has no other way to learn the
+SoC. Where only `/device-tree` is provided, `environment` passes with a note
+saying so, MPP falls back to its default SoC table and registers no decoder for
+the RK3566, and `vpu` fails with that cause stated. `config.yaml` also lists the DRM card and render
 nodes, `/dev/mali0`, `/dev/mpp_service`, `/dev/rga` and the DMA heaps under
 `devices:`. Nodes a kernel does not create are skipped. The process runs as
 root because these nodes are root-only on the Green.

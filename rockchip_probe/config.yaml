@@ -16,8 +16,10 @@ homeassistant_api: false
 startup: application
 boot: manual
 
-# MPP picks its codec table by matching /proc/device-tree/compatible; without
-# this the path does not resolve and MPP silently falls back to defaults.
+# MPP picks its codec table by matching /proc/device-tree/compatible, so that
+# path must be readable in the container. Where only /device-tree is provided,
+# the probe's own SoC check still works, but MPP falls back to its default
+# table and the vpu probe fails, saying why.
 devicetree: true
 
 # Absent nodes are skipped, so the list can be the superset across kernels.

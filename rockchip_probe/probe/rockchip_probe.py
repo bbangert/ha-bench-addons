@@ -246,12 +246,26 @@ def mali_kernel_info():
     return info
 
 
+MPP_DT_NOTE = ("only /device-tree/compatible is readable: MPP reads /proc/device-tree and will fall back to "
+               "default codec capabilities")
+
+
+def device_tree_access():
+    access = {p: read_text(p) is not None for p in ("/proc/device-tree/compatible", "/device-tree/compatible")}
+    notes = []
+    if access["/device-tree/compatible"] and not access["/proc/device-tree/compatible"]:
+        notes.append(MPP_DT_NOTE)
+    return access, notes
+
+
 def probe_environment(ctx):
     soc = ctx["soc"]
+    dt_access, notes = device_tree_access()
     nodes = sorted(set(DEVICE_NODES) | set(glob.glob("/dev/dri/*")) | set(glob.glob("/dev/dma_heap/*"))
                    | set(glob.glob("/dev/rk_dma_heap/*")))
     raw = {
-        "device_tree": soc,
+        "device_tree": {**soc, "readable": dt_access, "soc_check_used": soc["source"]},
+        "notes": notes,
         "kernel": {"release": os.uname().release, "version": os.uname().version,
                    "machine": os.uname().machine, "proc_version": read_text("/proc/version")},
         "devices": [describe_node(p) for p in nodes],
@@ -272,6 +286,9 @@ def probe_environment(ctx):
              f"{len(present)} device nodes present"
     if missing:
         detail += f"; absent: {', '.join(missing)}"
+    detail += f"; SoC check read {soc['source']}/compatible"
+    if notes:
+        detail += "; note: " + "; ".join(notes)
     return "pass", detail, raw
 
 
@@ -452,13 +469,19 @@ def mpp_decode(path, codec, expected_frames):
     api = re.findall(r"found api (\S+) for coding \d+ client (\d+)", text)
     frames = re.search(r"decode (\d+) frames time (\d+) ms .*?fps\s*([\d.]+)", text)
     chip = re.search(r"match chip name: (\S+)", text)
+    soc_log = {
+        "compatible_open_error": "open /proc/device-tree/compatible error" in text,
+        "no_soc_match": (m.group(1).strip() if (m := re.search(r"can not found match soc name: ?(.*)", text)) else None),
+        "default_chip_info": "use default chip info" in text,
+    }
     errors = len(re.findall(r"decode get frame \d+.* err [0-9a-f]+ discard", text))
     got = int(frames.group(1)) if frames else None
     check = {
         "file": os.path.basename(path), "codec": codec, "expected_frames": expected_frames,
         "frames": got, "fps": float(frames.group(3)) if frames else None,
         "hal": [a[0] for a in api], "client_type": [int(a[1]) for a in api],
-        "soc_matched": chip.group(1) if chip else None, "error_frames": errors, "process": r,
+        "soc_matched": chip.group(1) if chip else None, "mpp_soc_log": soc_log, "error_frames": errors,
+        "process": r,
     }
     problems = []
     if r["rc"] != 0:
@@ -536,6 +559,21 @@ def probe_vpu(ctx):
     mpp_version = re.search(r"mpp version: (.*)", output_of(info))
     parts.append(f"mpp_info_test {'ok' if info['rc'] == 0 else failure_of(info)}"
                  + (f" (mpp version: {mpp_version.group(1).strip()[:80]})" if mpp_version else ""))
+
+    # MPP picks its SoC table only from /proc/device-tree/compatible; without
+    # it the HALs for this SoC do not register, which otherwise reads as a
+    # plain decode failure.
+    dt_access, _ = device_tree_access()
+    detected = sorted({d["soc_matched"] for d in raw["decode"] if d.get("soc_matched")})
+    fell_back = any(d["mpp_soc_log"]["default_chip_info"] or d["mpp_soc_log"]["no_soc_match"] is not None
+                    or d["mpp_soc_log"]["compatible_open_error"] for d in raw["decode"])
+    raw["mpp_soc"] = {"detected": detected, "default_table": fell_back, "device_tree_readable": dt_access}
+    parts.insert(0, f"MPP detected SoC {', '.join(detected)}" if detected
+                 else "MPP detected no SoC" + (" and used its default table" if fell_back else ""))
+    if not ok and not dt_access["/proc/device-tree/compatible"]:
+        parts.insert(0, "cause: /proc/device-tree/compatible is not readable in the container, so MPP falls back "
+                        "to its default SoC table, under which no decoder for this SoC is registered"
+                     + (" (only /device-tree is provided)" if dt_access["/device-tree/compatible"] else ""))
     return ("pass" if ok else "fail"), "; ".join(parts), raw
 
 
