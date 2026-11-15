@@ -61,8 +61,9 @@ If `/proc/device-tree/compatible` does not name `rockchip,rk3566` or
 RGA is the SoC's 2D engine and its only hardware scaler, so it sits between
 the decoder and the NPU: decoded NV12 frames are scaled and converted to the
 detector's RGB input on it. `rgaprobe` ([`rgaprobe.cpp`](rgaprobe.cpp)) drives
-it through librga's im2d API and prints one `case=… buf=… ok=… ms=… detail=…`
-line per result:
+it through librga's im2d API and writes one `case=… buf=… ok=… ms=… detail=…`
+line per result to a results file of its own (`--results`), because librga
+prints its log to stdout:
 
 | Case | What is checked |
 |---|---|
@@ -84,7 +85,12 @@ timing. All cases run for every buffer type: dma-bufs from `system`,
 `system-uncached`, `reserved` and `rk-dma-heap-cma`, user memory imported with
 `importbuffer_virtualaddr` (`va`), and user memory passed per job with
 `wrapbuffer_virtualaddr` (`va-wrap`). Only `system` gates; the others are
-reported per buffer type. RGA2 addresses only memory below 4 GiB; the probe
+reported per buffer type. On `va` and `va-wrap`, once one case fails the
+remaining cases are reported as not attempted rather than submitted, since
+each refused job makes librga print a long error table; a failing case is
+never retried for timing. The report keeps the first and last 40 lines of
+librga's log with a count of what was left out. RGA2 addresses only memory
+below 4 GiB; the probe
 reports per buffer type whether a job was accepted, and keeps librga's own
 error text verbatim in `raw.librga_log`.
 
