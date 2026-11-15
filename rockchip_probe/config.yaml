@@ -1,7 +1,7 @@
 name: Rockchip Probe
 slug: rockchip_probe
 version: "0.1.0"
-description: Runs the RK3566/RK3568 NPU, GPU and video codecs from inside an app container and reports what worked
+description: Runs the RK3566/RK3568 NPU, GPU, video codecs and RGA 2D accelerator from inside an app container and reports what worked
 arch:
   - aarch64
 init: false

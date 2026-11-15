@@ -25,9 +25,12 @@ PORT = 8000
 OUTPUT_LIMIT = 20000
 
 ALL_PROBES = ["environment", "npu", "gpu", "vpu", "rga"]
-# The accelerator checks. environment and rga alone prove nothing about them,
-# so a run without at least one of these passing cannot be "pass".
-GATING_PROBES = ("npu", "gpu", "vpu")
+# The accelerator checks. environment alone proves nothing about them, so a
+# run without at least one of these passing cannot be "pass".
+GATING_PROBES = ("npu", "gpu", "vpu", "rga")
+RGA_CASES = ("copy", "resize-nv12", "resize-rgba", "cvtcolor", "letterbox", "crop-rotate-flip", "fill")
+# A failed job on these fails the probe; the other heaps are reported per heap.
+RGA_GATING_BUFFERS = ("va", "system")
 DEFAULT_OPTIONS = {"probes": list(ALL_PROBES), "npu_loop_seconds": 10}
 ENCODE_FRAMES = 30
 SUPPORTED_SOCS = ("rockchip,rk3566", "rockchip,rk3568")
@@ -499,17 +502,84 @@ def probe_vpu(ctx):
     return ("pass" if ok else "fail"), "; ".join(parts), raw
 
 
+def parse_rgaprobe(text):
+    # rgaprobe's own lines start with case=; anything else is librga's log.
+    results, log_lines = [], []
+    for line in text.splitlines():
+        if not line.startswith("case="):
+            if line.strip():
+                log_lines.append(line)
+            continue
+        head, _, detail = line.partition(" detail=")
+        entry = dict(kv.split("=", 1) for kv in head.split() if "=" in kv)
+        entry["ok"] = entry.get("ok") == "1"
+        for k in ("ms", "min", "max", "mae"):
+            if k in entry:
+                entry[k] = float(entry[k])
+        for k in ("n", "maxerr", "jobs", "failures", "checksums"):
+            if k in entry:
+                entry[k] = int(entry[k])
+        entry["detail"] = detail
+        results.append(entry)
+    return results, log_lines
+
+
+def rga_verdict(results):
+    by = {(r["case"], r.get("buf")): r for r in results}
+    problems = []
+    version = by.get(("version", "-"))
+    if not version or not version["ok"]:
+        problems.append("RGA version not readable" + (f": {version['detail']}" if version else ""))
+    buffers = sorted({r["buf"] for r in results if r["case"] in RGA_CASES})
+    summary = {}
+    for buf in buffers:
+        failed = [c for c in RGA_CASES if not by.get((c, buf), {}).get("ok")]
+        summary[buf] = "all cases ok" if not failed else "failed: " + ", ".join(failed)
+    for buf in RGA_GATING_BUFFERS:
+        failed = [c for c in RGA_CASES if not by.get((c, buf), {}).get("ok")]
+        if failed:
+            reasons = {}
+            for c in failed:
+                reasons.setdefault(by[(c, buf)]["detail"] if (c, buf) in by else "no result", []).append(c)
+            problems.append(f"{buf} buffers: " + "; ".join(f"{', '.join(cs)} ({why})" for why, cs in reasons.items()))
+    return problems, summary
+
+
 def probe_rga(ctx):
-    raw = {"node": describe_node("/dev/rga"),
-           "files": {p: read_text(p) for p in (
-               "/sys/kernel/debug/rkrga/driver_version", "/sys/kernel/debug/rkrga/hardware",
-               "/proc/rkrga/driver_version", "/proc/rkrga/hardware")}}
-    node = raw["node"]
-    version = next((v for p, v in raw["files"].items() if p.endswith("driver_version") and v), None)
-    detail = (f"/dev/rga {node['major_minor']} open {node.get('open_rw')}" if node.get("present")
-              else "/dev/rga absent")
-    detail += f"; driver {version}" if version else "; driver version not visible in the container"
-    return "reported", detail, raw
+    r = run(["/usr/local/bin/rgaprobe"], timeout=240)
+    results, log_lines = parse_rgaprobe(r.get("stdout", ""))
+    raw = {
+        "node": describe_node("/dev/rga"),
+        "files": {p: read_text(p) for p in (
+            "/sys/kernel/debug/rkrga/driver_version", "/sys/kernel/debug/rkrga/hardware",
+            "/proc/rkrga/driver_version", "/proc/rkrga/hardware")},
+        "results": results,
+        # librga logs its reasons for refusing a buffer (e.g. memory above
+        # 4 GiB) itself; keep them verbatim.
+        "librga_log": (log_lines + (r.get("stderr") or "").splitlines())[-200:],
+        "process": {k: v for k, v in r.items() if k not in ("stdout", "stderr")},
+    }
+    problems, summary = rga_verdict(results)
+    raw["buffers"] = summary
+    if r["rc"] not in (0, 1):
+        problems.insert(0, f"rgaprobe {failure_of(r)}")
+
+    by = {(x["case"], x.get("buf")): x for x in results}
+    parts = []
+    if (v := by.get(("version", "-"))) and v["ok"]:
+        parts.append(f"version {v['detail']}")
+    head = by.get(("letterbox", "system"))
+    if head and head["ok"]:
+        parts.append(f"letterbox on system heap {head.get('ms')} ms (mae {head.get('mae')}, {head.get('matched')})")
+    if cpu := by.get(("cpu-letterbox", "cpu")):
+        parts.append(f"CPU reference letterbox {cpu.get('ms')} ms")
+    if stress := by.get(("stress", "system")):
+        parts.append(f"stress {stress.get('jobs')} jobs, {stress.get('failures')} failed, "
+                     f"{stress.get('checksums')} distinct checksums")
+    parts.append("buffers: " + "; ".join(f"{b} {s}" for b, s in summary.items()))
+    if problems:
+        return "fail", "; ".join(problems + parts), raw
+    return "pass", "; ".join(parts), raw
 
 
 PROBES = {"environment": probe_environment, "npu": probe_npu, "gpu": probe_gpu, "vpu": probe_vpu,
