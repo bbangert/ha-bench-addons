@@ -10,6 +10,7 @@ import os
 import shutil
 import time
 import sys
+import tempfile
 import urllib.request
 import zipfile
 
@@ -159,11 +160,11 @@ def safe_extract(zip_path, dest):
 # other site-* tree is removed.
 def unpack_wheel(wheel, sha, directory):
     target = os.path.join(directory, f"site-{sha[:16]}")
-    tmp = f"{target}.part-{os.getpid()}"
-    shutil.rmtree(tmp, ignore_errors=True)
-    os.makedirs(tmp)
+    # Unique names, not PIDs: a run stopped mid-swap leaves its directories
+    # behind, and a later child can get the same PID.
+    tmp = tempfile.mkdtemp(prefix=f"site-{sha[:16]}.part-", dir=directory)
     safe_extract(wheel, tmp)
-    old = f"{target}.old-{os.getpid()}"
+    old = f"{target}.old-{os.urandom(8).hex()}"
     if os.path.lexists(target):
         os.rename(target, old)
     os.rename(tmp, target)
@@ -196,13 +197,14 @@ def ensure(sources_path, allow_download, budget_seconds=120):
         report.update(error=str(e), seconds=round(time.monotonic() - t0, 2))
         return report
     report.update(directory=directory, persistent=persistent, note=note)
-    # A fetch killed at its hard limit leaves partial downloads behind.
+    # A fetch killed at its hard limit, or an app stopped mid-swap, leaves
+    # partial downloads and old trees behind.
     for d in (directory,) + EXEC_DIRS:
         try:
             for name in os.listdir(d):
-                if ".part-" in name:
+                if ".part-" in name or ".old-" in name:
                     path = os.path.join(d, name)
-                    shutil.rmtree(path) if os.path.isdir(path) else os.unlink(path)
+                    shutil.rmtree(path, ignore_errors=True) if os.path.isdir(path) else os.unlink(path)
         except OSError:
             pass
 
