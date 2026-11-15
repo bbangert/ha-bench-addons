@@ -1,7 +1,7 @@
 // rgaprobe: does the RGA 2D accelerator produce correct output through librga's
 // im2d API, for each kind of buffer an app can hand it?
 //
-//   rgaprobe [--buffers va,system,...] [--iterations N] [--stress N]
+//   rgaprobe [--buffers system,va,...] [--iterations N] [--stress N]
 //   rgaprobe --selftest
 //
 // One line per result: `case=<name> buf=<buffer> ok=0|1 ms=<mean> ... detail=<text>`.
@@ -63,7 +63,6 @@ static uint64_t fnv1a(const uint8_t *p, size_t n) {
 
 static uint8_t clamp8(double v) { return (uint8_t)std::lround(std::min(255.0, std::max(0.0, v))); }
 
-// ---- test pattern and CPU references ---------------------------------------
 
 // Smooth gradients for the bulk (what scalers should reproduce closely), colour
 // bars and a few hard lines and a checker block (where scaler kernels differ),
@@ -252,10 +251,10 @@ static Bytes swap_rb(const Bytes &rgb) {
   return out;
 }
 
-// ---- buffers ---------------------------------------------------------------
 
 struct Buf {
   std::string kind;
+  bool wrap = false;  // user memory handed over per job, never imported
   uint8_t *ptr = nullptr;
   size_t size = 0;
   int fd = -1;
@@ -292,13 +291,17 @@ static Buf *alloc_buf(const std::string &kind, size_t size) {
   Buf *b = new Buf;
   b->kind = kind;
   b->size = (size + 4095) & ~(size_t)4095;
-  if (kind == "va") {
+  if (kind == "va" || kind == "va-wrap") {
     void *p = nullptr;
     if (posix_memalign(&p, 4096, b->size) != 0) {
       b->error = "posix_memalign failed";
       return b;
     }
     b->ptr = (uint8_t *)p;
+    if (kind == "va-wrap") {
+      b->wrap = true;
+      return b;
+    }
     b->handle = importbuffer_virtualaddr(b->ptr, (int)b->size);
   } else {
     std::string path = heap_path(kind);
@@ -330,10 +333,17 @@ static Buf *alloc_buf(const std::string &kind, size_t size) {
   return b;
 }
 
-// ---- reporting -------------------------------------------------------------
+// va-wrap takes librga's legacy path: the address goes into each request and
+// the driver maps it per job instead of at import.
+static rga_buffer_t wrap(Buf *b, int w, int h, int format) {
+  return b->wrap ? wrapbuffer_virtualaddr_t(b->ptr, w, h, w, h, format) : wrapbuffer_handle(b->handle, w, h, format);
+}
+
 
 static bool g_all_ok = true;
-static std::set<std::string> g_gating_buffers = {"va", "system"};
+// Only dma-heap system buffers gate: on RK356x the vendor driver refuses
+// non-contiguous user memory for RGA2 (see the README).
+static std::set<std::string> g_gating_buffers = {"system"};
 
 struct Timing { double mean = 0, min = 0, max = 0; int n = 0; };
 
@@ -376,7 +386,10 @@ static std::string fmt(const char *f, double a, double b = 0) {
   return buf;
 }
 
-// ---- cases -----------------------------------------------------------------
+
+struct Mode { const char *name; int mode; bool full; };
+static const Mode MODES[] = {{"bt601-limited", IM_YUV_TO_RGB_BT601_LIMIT, false},
+                             {"bt601-full", IM_YUV_TO_RGB_BT601_FULL, true}};
 
 struct Ctx {
   std::string kind;
@@ -402,8 +415,8 @@ static void case_copy(const Ctx &c) {
   if (!buffers(c, "copy", src.size(), src.size(), in, out)) return;
   in->write(src);
   out->fill(0xcd);
-  rga_buffer_t s = wrapbuffer_handle(in->handle, w, h, RK_FORMAT_RGBA_8888);
-  rga_buffer_t d = wrapbuffer_handle(out->handle, w, h, RK_FORMAT_RGBA_8888);
+  rga_buffer_t s = wrap(in, w, h, RK_FORMAT_RGBA_8888);
+  rga_buffer_t d = wrap(out, w, h, RK_FORMAT_RGBA_8888);
   auto job = [&] { return imcopy(s, d); };
   IM_STATUS st = job();
   if (!good(st)) {
@@ -442,8 +455,8 @@ static void case_resize(const Ctx &c) {
     if (buffers(c, "resize-nv12", src.size(), out_size, in, out)) {
       in->write(src);
       out->fill(0xcd);
-      rga_buffer_t s = wrapbuffer_handle(in->handle, sw, sh, RK_FORMAT_YCbCr_420_SP);
-      rga_buffer_t d = wrapbuffer_handle(out->handle, dw, dh, RK_FORMAT_YCbCr_420_SP);
+      rga_buffer_t s = wrap(in, sw, sh, RK_FORMAT_YCbCr_420_SP);
+      rga_buffer_t d = wrap(out, dw, dh, RK_FORMAT_YCbCr_420_SP);
       auto job = [&] { return imresize(s, d); };
       IM_STATUS st = job();
       if (!good(st)) {
@@ -470,8 +483,8 @@ static void case_resize(const Ctx &c) {
     if (buffers(c, "resize-rgba", rgba.size(), out_size, in, out)) {
       in->write(rgba);
       out->fill(0xcd);
-      rga_buffer_t s = wrapbuffer_handle(in->handle, sw, sh, RK_FORMAT_RGBA_8888);
-      rga_buffer_t d = wrapbuffer_handle(out->handle, dw, dh, RK_FORMAT_RGBA_8888);
+      rga_buffer_t s = wrap(in, sw, sh, RK_FORMAT_RGBA_8888);
+      rga_buffer_t d = wrap(out, dw, dh, RK_FORMAT_RGBA_8888);
       auto job = [&] { return imresize(s, d); };
       IM_STATUS st = job();
       if (!good(st)) {
@@ -493,53 +506,53 @@ static void case_resize(const Ctx &c) {
   }
 }
 
-static void case_cvtcolor(const Ctx &c) {
+// The mode is always requested explicitly, and the output must match the
+// requested range and be closer to it than to the other: imcvtcolor and
+// improcess pick different defaults otherwise.
+static void case_cvtcolor(const Ctx &c, const Mode &m) {
   const int w = 1280, h = 720;
+  const std::string name = std::string("cvtcolor-") + m.name;
   Bytes src = rgba_to_nv12(pattern_rgba(w, h), w, h);
   size_t out_size = (size_t)w * h * 3;
   Buf *in, *out;
-  if (!buffers(c, "cvtcolor", src.size(), out_size, in, out)) return;
+  if (!buffers(c, name, src.size(), out_size, in, out)) return;
   in->write(src);
-  rga_buffer_t s = wrapbuffer_handle(in->handle, w, h, RK_FORMAT_YCbCr_420_SP);
-  rga_buffer_t d = wrapbuffer_handle(out->handle, w, h, RK_FORMAT_RGB_888);
-
-  std::string detail, matched, terr;
-  Err best = {1e9, 255};
-  std::function<IM_STATUS()> best_job;
-  struct Mode { const char *name; int mode; bool full; };
-  for (Mode m : {Mode{"bt601-limited", IM_YUV_TO_RGB_BT601_LIMIT, false}, Mode{"bt601-full", IM_YUV_TO_RGB_BT601_FULL, true}}) {
-    out->fill(0xcd);
-    auto job = [&, m] { return imcvtcolor(s, d, RK_FORMAT_YCbCr_420_SP, RK_FORMAT_RGB_888, m.mode); };
-    IM_STATUS st = job();
-    if (!good(st)) {
-      detail += std::string(m.name) + ": imcvtcolor " + status_text(st) + "; ";
-      continue;
-    }
+  out->fill(0xcd);
+  rga_buffer_t s = wrap(in, w, h, RK_FORMAT_YCbCr_420_SP);
+  rga_buffer_t d = wrap(out, w, h, RK_FORMAT_RGB_888);
+  auto job = [&] { return imcvtcolor(s, d, RK_FORMAT_YCbCr_420_SP, RK_FORMAT_RGB_888, m.mode); };
+  IM_STATUS st = job();
+  if (!good(st)) {
+    emit(name, c.kind, false, {}, std::string("requested=") + m.name, "imcvtcolor: " + status_text(st));
+  } else {
     Bytes got = out->read(out_size);
-    Bytes ref = nv12_to_rgb888(src, w, h, m.full);
+    Bytes ref = nv12_to_rgb888(src, w, h, m.full), other = nv12_to_rgb888(src, w, h, !m.full);
     Err e = compare(got.data(), ref.data(), ref.size());
+    Err o = compare(got.data(), other.data(), other.size());
     Err swapped = compare(got.data(), swap_rb(ref).data(), ref.size());
-    detail += std::string(m.name) + fmt(": mae %.3f max %.0f", e.mae, e.max);
-    if (swapped.mae < e.mae) detail += fmt(" (R/B swapped would give mae %.3f)", swapped.mae);
-    detail += "; ";
-    if (e.mae < best.mae) best = e, matched = m.name, best_job = job;
+    bool ok = e.mae <= MAE_CVT && e.mae < o.mae;
+    std::string terr;
+    Timing t = time_job(c.iterations, job, terr);
+    emit(name, c.kind, ok && terr.empty(), t,
+         std::string("requested=") + m.name + " mae=" + fmt("%.3f", e.mae) + " maxerr=" + std::to_string(e.max) +
+             " other_range_mae=" + fmt("%.3f", o.mae),
+         std::string("NV12 1280x720 -> RGB888, output vs CPU BT.601 ") + m.name +
+             (e.mae < o.mae ? " (matches the requested range)" : " (closer to the other range)") +
+             (swapped.mae < e.mae ? fmt("; R/B swapped would give mae %.3f", swapped.mae) : "") +
+             fmt("; threshold mae<=%.1f", MAE_CVT) + (terr.empty() ? "" : "; " + terr));
   }
-  bool ok = best.mae <= MAE_CVT;
-  Timing t;
-  if (ok) t = time_job(c.iterations, best_job, terr);
-  emit("cvtcolor", c.kind, ok && terr.empty(), t,
-       std::string("mae=") + fmt("%.3f", best.mae) + " maxerr=" + std::to_string(best.max) + " matched=" +
-           (matched.empty() ? "none" : matched),
-       "NV12 1280x720 -> RGB888 vs CPU BT.601; " + detail + fmt("threshold mae<=%.1f", MAE_CVT) +
-           (terr.empty() ? "" : "; " + terr));
   delete in, delete out;
 }
 
 // The NVR's step: camera NV12 to a padded RGB888 square for the detector, in
-// three sync jobs (two pad bands, one scale+convert into the centre).
-static IM_STATUS letterbox_job(rga_buffer_t s, rga_buffer_t d, int sw, int sh, int dw, int dh) {
+// sync jobs (pad bands by fill, then one scale+convert into the centre).
+static IM_STATUS letterbox_job(rga_buffer_t s, rga_buffer_t d, int sw, int sh, int dw, int dh, int mode) {
   Box b = letterbox_box(sw, sh, dw, dh);
-  const int grey = (PAD << 24) | (PAD << 16) | (PAD << 8) | 0xff;
+  // librga and the RGA2 driver pass the fill colour to the hardware register
+  // untouched, and which byte lands in which channel depends on the output
+  // format (RGBA puts bits 7:0 in R). The same value in all four bytes is grey
+  // whatever the mapping.
+  const int grey = PAD * 0x01010101;
   IM_STATUS st;
   if (b.y > 0) {
     if (!good(st = imfill(d, im_rect{0, 0, dw, b.y}, grey))) return st;
@@ -551,53 +564,76 @@ static IM_STATUS letterbox_job(rga_buffer_t s, rga_buffer_t d, int sw, int sh, i
   }
   rga_buffer_t pat;
   memset(&pat, 0, sizeof pat);
+  d.color_space_mode = mode;
   return improcess(s, d, pat, im_rect{0, 0, sw, sh}, im_rect{b.x, b.y, b.w, b.h}, im_rect{0, 0, 0, 0}, IM_SYNC);
 }
 
-struct LetterboxResult { bool ok; Err err; std::string matched, detail; };
+struct LetterboxResult {
+  bool ok;
+  size_t pad_bad;
+  Err content, other;
+  std::string kernel, detail;
+};
 
-static LetterboxResult check_letterbox(const Bytes &src, const Bytes &got, int sw, int sh, int dw, int dh) {
+static Err compare_box(const Bytes &a, const Bytes &b, int dw, Box box) {
+  double sum = 0;
+  int mx = 0;
+  for (int y = box.y; y < box.y + box.h; y++) {
+    Err e = compare(&a[((size_t)y * dw + box.x) * 3], &b[((size_t)y * dw + box.x) * 3], (size_t)box.w * 3);
+    sum += e.mae * box.w * 3, mx = std::max(mx, e.max);
+  }
+  return {sum / ((double)box.w * box.h * 3), mx};
+}
+
+static LetterboxResult check_letterbox(const Bytes &src, const Bytes &got, int sw, int sh, int dw, int dh, bool full) {
   Box b = letterbox_box(sw, sh, dw, dh);
-  size_t pad_bad = 0;
+  LetterboxResult r{false, 0, {1e9, 255}, {1e9, 255}, "none", ""};
   for (int y = 0; y < dh; y++)
     for (int x = 0; x < dw; x++)
       if (y < b.y || y >= b.y + b.h || x < b.x || x >= b.x + b.w)
-        for (int ch = 0; ch < 3; ch++) pad_bad += got[((size_t)y * dw + x) * 3 + ch] != PAD;
-  LetterboxResult r{false, {1e9, 255}, "none", ""};
-  for (bool full : {false, true})
+        for (int ch = 0; ch < 3; ch++) r.pad_bad += got[((size_t)y * dw + x) * 3 + ch] != PAD;
+  for (bool range : {full, !full})
     for (Kernel k : {BILINEAR, AREA, NEAREST}) {
-      Bytes ref = letterbox_ref(src, sw, sh, dw, dh, full, k);
-      Err e = compare(got.data(), ref.data(), ref.size());
-      if (e.mae < r.err.mae) r.err = e, r.matched = std::string(full ? "bt601-full" : "bt601-limited") + "/" + kernel_name(k);
+      Err e = compare_box(got, letterbox_ref(src, sw, sh, dw, dh, range, k), dw, b);
+      Err &slot = range == full ? r.content : r.other;
+      if (e.mae < slot.mae) {
+        slot = e;
+        if (range == full) r.kernel = kernel_name(k);
+      }
     }
-  r.ok = pad_bad == 0 && r.err.mae <= MAE_LETTERBOX;
+  r.ok = r.pad_bad == 0 && r.content.mae <= MAE_LETTERBOX && r.content.mae < r.other.mae;
   r.detail = "NV12 " + std::to_string(sw) + "x" + std::to_string(sh) + " -> RGB888 " + std::to_string(dw) + "x" +
              std::to_string(dh) + ", content " + std::to_string(b.w) + "x" + std::to_string(b.h) + " at y=" +
-             std::to_string(b.y) + ", pad " + std::to_string(PAD) + "; " + std::to_string(pad_bad) +
-             " pad bytes wrong; closest reference " + r.matched + fmt("; threshold mae<=%.1f", MAE_LETTERBOX);
+             std::to_string(b.y) + " vs " + (full ? "bt601-full" : "bt601-limited") + "/" + r.kernel +
+             (r.content.mae < r.other.mae ? " (matches the requested range)" : " (closer to the other range)") + ", pad " +
+             std::to_string(PAD) + ": " + std::to_string(r.pad_bad) + " pad bytes wrong" +
+             fmt("; threshold content mae<=%.1f, pad exact", MAE_LETTERBOX);
   return r;
 }
 
-static void case_letterbox(const Ctx &c) {
+static void case_letterbox(const Ctx &c, const Mode &m) {
   const int sw = 1920, sh = 1080, dw = 640, dh = 640;
+  const std::string name = std::string("letterbox-") + m.name;
   Bytes src = rgba_to_nv12(pattern_rgba(sw, sh), sw, sh);
   size_t out_size = (size_t)dw * dh * 3;
   Buf *in, *out;
-  if (!buffers(c, "letterbox", src.size(), out_size, in, out)) return;
+  if (!buffers(c, name, src.size(), out_size, in, out)) return;
   in->write(src);
   out->fill(0xcd);
-  rga_buffer_t s = wrapbuffer_handle(in->handle, sw, sh, RK_FORMAT_YCbCr_420_SP);
-  rga_buffer_t d = wrapbuffer_handle(out->handle, dw, dh, RK_FORMAT_RGB_888);
-  auto job = [&] { return letterbox_job(s, d, sw, sh, dw, dh); };
+  rga_buffer_t s = wrap(in, sw, sh, RK_FORMAT_YCbCr_420_SP);
+  rga_buffer_t d = wrap(out, dw, dh, RK_FORMAT_RGB_888);
+  auto job = [&] { return letterbox_job(s, d, sw, sh, dw, dh, m.mode); };
   IM_STATUS st = job();
   if (!good(st)) {
-    emit("letterbox", c.kind, false, {}, "", "letterbox: " + status_text(st));
+    emit(name, c.kind, false, {}, std::string("requested=") + m.name, "letterbox: " + status_text(st));
   } else {
-    LetterboxResult r = check_letterbox(src, out->read(out_size), sw, sh, dw, dh);
+    LetterboxResult r = check_letterbox(src, out->read(out_size), sw, sh, dw, dh, m.full);
     std::string terr;
     Timing t = time_job(c.iterations, job, terr);
-    emit("letterbox", c.kind, r.ok && terr.empty(), t,
-         std::string("mae=") + fmt("%.3f", r.err.mae) + " maxerr=" + std::to_string(r.err.max) + " matched=" + r.matched,
+    emit(name, c.kind, r.ok && terr.empty(), t,
+         std::string("requested=") + m.name + " content_mae=" + fmt("%.3f", r.content.mae) +
+             " content_maxerr=" + std::to_string(r.content.max) + " other_range_mae=" + fmt("%.3f", r.other.mae) +
+             " pad_bad=" + std::to_string(r.pad_bad) + " kernel=" + r.kernel,
          r.detail + (terr.empty() ? "" : "; " + terr));
   }
   delete in, delete out;
@@ -612,8 +648,8 @@ static void case_crop_rotate_flip(const Ctx &c) {
   if (!buffers(c, "crop-rotate-flip", src.size(), out_size, in, out)) return;
   in->write(src);
   out->fill(0xcd);
-  rga_buffer_t s = wrapbuffer_handle(in->handle, w, h, RK_FORMAT_RGBA_8888);
-  rga_buffer_t d = wrapbuffer_handle(out->handle, crop.h, crop.w, RK_FORMAT_RGBA_8888);
+  rga_buffer_t s = wrap(in, w, h, RK_FORMAT_RGBA_8888);
+  rga_buffer_t d = wrap(out, crop.h, crop.w, RK_FORMAT_RGBA_8888);
   rga_buffer_t pat;
   memset(&pat, 0, sizeof pat);
   auto job = [&] {
@@ -654,7 +690,7 @@ static void case_fill(const Ctx &c) {
   Buf *in, *out;
   if (!buffers(c, "fill", 4096, src.size(), in, out)) return;
   out->write(src);
-  rga_buffer_t d = wrapbuffer_handle(out->handle, w, h, RK_FORMAT_RGBA_8888);
+  rga_buffer_t d = wrap(out, w, h, RK_FORMAT_RGBA_8888);
   auto job = [&] { return imfill(d, im_rect{r.x, r.y, r.w, r.h}, color); };
   IM_STATUS st = job();
   if (!good(st)) {
@@ -687,6 +723,48 @@ static void case_fill(const Ctx &c) {
   delete in, delete out;
 }
 
+// Records how the 32-bit fill colour maps onto a 24-bit format, which the
+// guide does not state; any consistent 3-byte window of the colour passes.
+static void case_fill_rgb888(const Ctx &c) {
+  const int w = 1280, h = 720;
+  const Box r = {100, 50, 320, 200};
+  const int color = 0x44332211;
+  Bytes src = nv12_to_rgb888(rgba_to_nv12(pattern_rgba(w, h), w, h), w, h, false);
+  Buf *in, *out;
+  if (!buffers(c, "fill-rgb888", 4096, src.size(), in, out)) return;
+  out->write(src);
+  rga_buffer_t d = wrap(out, w, h, RK_FORMAT_RGB_888);
+  auto job = [&] { return imfill(d, im_rect{r.x, r.y, r.w, r.h}, color); };
+  IM_STATUS st = job();
+  if (!good(st)) {
+    emit("fill-rgb888", c.kind, false, {}, "", "imfill: " + status_text(st));
+  } else {
+    Bytes got = out->read(src.size());
+    const uint8_t *first = &got[((size_t)r.y * w + r.x) * 3];
+    size_t outside = 0, nonuniform = 0;
+    for (int y = 0; y < h; y++)
+      for (int x = 0; x < w; x++) {
+        size_t i = ((size_t)y * w + x) * 3;
+        bool in_rect = x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+        if (in_rect) nonuniform += memcmp(&got[i], first, 3) != 0;
+        else outside += memcmp(&got[i], &src[i], 3) != 0;
+      }
+    const uint8_t windows[4][3] = {{0x11, 0x22, 0x33}, {0x22, 0x33, 0x44}, {0x33, 0x22, 0x11}, {0x44, 0x33, 0x22}};
+    bool known = false;
+    for (auto &wnd : windows) known |= memcmp(first, wnd, 3) == 0;
+    char bytes[16];
+    snprintf(bytes, sizeof bytes, "%02x,%02x,%02x", first[0], first[1], first[2]);
+    std::string terr;
+    Timing t = time_job(c.iterations, job, terr);
+    emit("fill-rgb888", c.kind, known && nonuniform == 0 && outside == 0 && terr.empty(), t,
+         std::string("memory=") + bytes,
+         std::string("RGB888 rect 320x200 at (100,50), colour 0x44332211 -> bytes ") + bytes + " in memory; " +
+             std::to_string(nonuniform) + " non-uniform pixels inside, " + std::to_string(outside) + " changed outside" +
+             (terr.empty() ? "" : "; " + terr));
+  }
+  delete in, delete out;
+}
+
 static void run_cpu_letterbox() {
   const int sw = 1920, sh = 1080, dw = 640, dh = 640;
   Bytes src = rgba_to_nv12(pattern_rgba(sw, sh), sw, sh);
@@ -711,8 +789,8 @@ static void run_stress(int jobs) {
   Buf *in, *out;
   if (!buffers(c, "stress", src.size(), out_size, in, out)) return;
   in->write(src);
-  rga_buffer_t s = wrapbuffer_handle(in->handle, sw, sh, RK_FORMAT_YCbCr_420_SP);
-  rga_buffer_t d = wrapbuffer_handle(out->handle, dw, dh, RK_FORMAT_RGB_888);
+  rga_buffer_t s = wrap(in, sw, sh, RK_FORMAT_YCbCr_420_SP);
+  rga_buffer_t d = wrap(out, dw, dh, RK_FORMAT_RGB_888);
   std::set<uint64_t> sums;
   int failures = 0;
   std::string first_error;
@@ -722,7 +800,7 @@ static void run_stress(int jobs) {
   for (int i = 0; i < jobs; i++) {
     out->fill(0);  // a job that silently does nothing must change the checksum
     double t0 = now_ms();
-    IM_STATUS st = letterbox_job(s, d, sw, sh, dw, dh);
+    IM_STATUS st = letterbox_job(s, d, sw, sh, dw, dh, IM_YUV_TO_RGB_BT601_LIMIT);
     double dt = now_ms() - t0;
     if (!good(st)) {
       if (first_error.empty()) first_error = "job " + std::to_string(i) + ": " + status_text(st);
@@ -737,7 +815,7 @@ static void run_stress(int jobs) {
   if (!t.n) t.min = 0;
   emit("stress", "system", failures == 0 && sums.size() == 1, t,
        "jobs=" + std::to_string(jobs) + " failures=" + std::to_string(failures) + " checksums=" + std::to_string(sums.size()),
-       std::to_string(jobs) + " consecutive letterbox jobs on dma-heap system buffers" +
+       std::to_string(jobs) + " consecutive bt601-limited letterbox jobs on dma-heap system buffers" +
            (first_error.empty() ? "" : "; first failure " + first_error));
   delete in, delete out;
 }
@@ -750,7 +828,6 @@ static void run_version() {
   emit("capabilities", "-", true, {}, "", one_line(querystring(RGA_ALL)));
 }
 
-// ---- self test (no RGA needed) ---------------------------------------------
 
 static void selftest() {
   auto check = [](const char *name, bool ok, const std::string &detail) {
@@ -811,14 +888,29 @@ static void selftest() {
   Bytes nv = rgba_to_nv12(pattern_rgba(192, 108), 192, 108);
   Bytes lr = letterbox_ref(nv, 192, 108, 64, 64, false, BILINEAR);
   Box sb = letterbox_box(192, 108, 64, 64);
-  LetterboxResult self = check_letterbox(nv, lr, 192, 108, 64, 64);
-  check("letterbox-reference", self.ok && self.err.mae == 0 && sb.y > 0, "the checker accepts its own reference: " + self.detail);
+  LetterboxResult self = check_letterbox(nv, lr, 192, 108, 64, 64, false);
+  check("letterbox-reference", self.ok && self.content.mae == 0 && sb.y > 0, "the checker accepts its own reference: " + self.detail);
   Bytes broken = lr;
   broken[0] = 0;
-  check("letterbox-checker-rejects-pad", !check_letterbox(nv, broken, 192, 108, 64, 64).ok, "a wrong pad byte fails");
+  check("letterbox-checker-rejects-pad", !check_letterbox(nv, broken, 192, 108, 64, 64, false).ok, "a wrong pad byte fails");
+  Bytes pad255 = lr;
+  for (size_t i = 0; i < pad255.size(); i += 3)
+    if (pad255[i] == PAD && pad255[i + 1] == PAD && pad255[i + 2] == PAD) pad255[i] = 255;
+  LetterboxResult p255 = check_letterbox(nv, pad255, 192, 108, 64, 64, false);
+  check("letterbox-checker-rejects-pad-channel", !p255.ok && p255.pad_bad > 0 && p255.content.mae == 0,
+        "one pad channel at 255 fails on the pad while the content still matches");
   Bytes shifted = letterbox_ref(nv, 192, 108, 64, 64, false, BILINEAR);
   std::rotate(shifted.begin(), shifted.begin() + 64 * 3 * 20, shifted.end());
-  check("letterbox-checker-rejects-shift", !check_letterbox(nv, shifted, 192, 108, 64, 64).ok, "content moved 20 rows fails");
+  check("letterbox-checker-rejects-shift", !check_letterbox(nv, shifted, 192, 108, 64, 64, false).ok, "content moved 20 rows fails");
+  Bytes fullref = letterbox_ref(nv, 192, 108, 64, 64, true, BILINEAR);
+  check("letterbox-checker-rejects-wrong-range", !check_letterbox(nv, fullref, 192, 108, 64, 64, false).ok &&
+        check_letterbox(nv, fullref, 192, 108, 64, 64, true).ok, "full-range output fails when limited was requested");
+  Bytes lim = nv12_to_rgb888(nv, 192, 108, false), ful = nv12_to_rgb888(nv, 192, 108, true);
+  double range_gap = compare(lim.data(), ful.data(), lim.size()).mae;
+  check("range-separation", range_gap > 2 * MAE_CVT, fmt("limited and full references differ by mae %.2f", range_gap));
+  const uint32_t grey = PAD * 0x01010101u;
+  check("pad-colour-packing", (grey & 0xff) == PAD && (grey >> 8 & 0xff) == PAD && (grey >> 16 & 0xff) == PAD && (grey >> 24) == PAD,
+        "the pad colour is 114 in every byte");
   Bytes ref601 = nv12_to_rgb888(nv, 192, 108, false);
   check("swap-detect", compare(ref601.data(), swap_rb(ref601).data(), ref601.size()).mae > 10,
         "an R/B swap is far outside the cvtcolor threshold");
@@ -826,7 +918,7 @@ static void selftest() {
 
 int main(int argc, char **argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
-  std::vector<std::string> kinds = {"va", "system", "system-uncached", "reserved", "rk-dma-heap-cma"};
+  std::vector<std::string> kinds = {"system", "system-uncached", "reserved", "rk-dma-heap-cma", "va", "va-wrap"};
   int iterations = 50, stress = 500;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -858,7 +950,9 @@ int main(int argc, char **argv) {
     std::string why = std::string("open /dev/rga: ") + strerror(errno) + "; librga not called";
     emit("version", "-", false, {}, "", why);
     for (const auto &k : kinds)
-      for (const char *name : {"copy", "resize-nv12", "resize-rgba", "cvtcolor", "letterbox", "crop-rotate-flip", "fill"})
+      for (const char *name : {"copy", "resize-nv12", "resize-rgba", "cvtcolor-bt601-limited", "cvtcolor-bt601-full",
+                               "letterbox-bt601-limited", "letterbox-bt601-full", "crop-rotate-flip", "fill",
+                               "fill-rgb888"})
         emit(name, k, false, {}, "", why);
     run_cpu_letterbox();
     if (stress > 0) emit("stress", "system", false, {}, "", why);
@@ -871,10 +965,11 @@ int main(int argc, char **argv) {
     Ctx c{k, iterations};
     case_copy(c);
     case_resize(c);
-    case_cvtcolor(c);
-    case_letterbox(c);
+    for (const Mode &m : MODES) case_cvtcolor(c, m);
+    for (const Mode &m : MODES) case_letterbox(c, m);
     case_crop_rotate_flip(c);
     case_fill(c);
+    case_fill_rgb888(c);
   }
   run_cpu_letterbox();
   if (stress > 0) run_stress(stress);
