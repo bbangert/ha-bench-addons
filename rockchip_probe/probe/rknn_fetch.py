@@ -5,9 +5,11 @@ URLs in RUNTIME_SOURCES, and nothing is used before its sha256 matches.
 """
 
 import hashlib
+import json
 import os
 import shutil
 import time
+import sys
 import urllib.request
 import zipfile
 
@@ -23,9 +25,10 @@ def read_sources(path):
     entries = []
     for line in open(path, encoding="utf-8").read().splitlines():
         parts = line.split()
-        if len(parts) == 5 and not line.startswith("#"):
-            name, version, sha, file, url = parts
-            entries.append({"name": name, "version": version, "sha256": sha, "file": file, "url": url})
+        if len(parts) == 6 and not line.startswith("#"):
+            name, version, sha, size, file, url = parts
+            entries.append({"name": name, "version": version, "sha256": sha, "size": int(size), "file": file,
+                            "url": url})
     return entries
 
 
@@ -76,7 +79,19 @@ def copy_verified(src, dest, sha):
     os.replace(tmp, dest)
 
 
-def download(url, dest, sha, deadline, attempts=3):
+class Refused(Exception):
+    """The server answered, but not with the pinned file; retrying cannot help."""
+
+
+def set_read_timeout(resp, seconds):
+    # urllib exposes no per-read timeout; the socket under the response does.
+    try:
+        resp.fp.raw._sock.settimeout(seconds)
+    except AttributeError:
+        pass
+
+
+def download(url, dest, sha, size, deadline, attempts=3):
     tmp = f"{dest}.part-{os.getpid()}"
     error = None
     for attempt in range(attempts):
@@ -84,29 +99,42 @@ def download(url, dest, sha, deadline, attempts=3):
         if remaining <= 1:
             error = error or "fetch deadline reached"
             break
+        got = 0
         try:
             h = hashlib.sha256()
             with urllib.request.urlopen(url, timeout=min(30, remaining)) as resp, open(tmp, "wb") as out:
+                length = resp.headers.get("Content-Length")
+                if length and length.isdigit() and int(length) > size:
+                    raise Refused(f"Content-Length {length} exceeds the pinned {size} bytes")
                 while True:
-                    if time.monotonic() > deadline:
-                        raise TimeoutError("fetch deadline reached during download")
-                    chunk = resp.read(1 << 16)
+                    # read1 returns after one socket read, so a server trickling
+                    # bytes cannot hold a single call past the deadline.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(f"fetch deadline reached after {got} of {size} bytes")
+                    set_read_timeout(resp, min(30, remaining))
+                    chunk = resp.read1(1 << 16)
                     if not chunk:
                         break
+                    got += len(chunk)
+                    if got > size:
+                        raise Refused(f"body exceeds the pinned {size} bytes")
                     h.update(chunk)
                     out.write(chunk)
             if h.hexdigest() != sha:
-                # Not retried: the same URL serving other bytes is not transient.
-                os.unlink(tmp)
-                return False, f"sha256 mismatch: got {h.hexdigest()}"
+                raise Refused(f"sha256 mismatch: got {h.hexdigest()} ({got} bytes)")
             os.replace(tmp, dest)
             return True, None
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
+            if time.monotonic() >= deadline - 0.5:
+                error = f"fetch deadline reached with {got} of {size} bytes received ({error})"
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
+            if isinstance(e, Refused):
+                break
             if attempt + 1 < attempts:
                 time.sleep(min(2 ** attempt, max(0, deadline - time.monotonic())))
     return False, error
@@ -168,6 +196,15 @@ def ensure(sources_path, allow_download, budget_seconds=120):
         report.update(error=str(e), seconds=round(time.monotonic() - t0, 2))
         return report
     report.update(directory=directory, persistent=persistent, note=note)
+    # A fetch killed at its hard limit leaves partial downloads behind.
+    for d in (directory,) + EXEC_DIRS:
+        try:
+            for name in os.listdir(d):
+                if ".part-" in name:
+                    path = os.path.join(d, name)
+                    shutil.rmtree(path) if os.path.isdir(path) else os.unlink(path)
+        except OSError:
+            pass
 
     ok = True
     for src in read_sources(sources_path):
@@ -184,7 +221,7 @@ def ensure(sources_path, allow_download, budget_seconds=120):
             entry.update(status="failed", error="not in the cache and rknn_fetch is false")
         else:
             t = time.monotonic()
-            done, error = download(src["url"], path, src["sha256"], deadline)
+            done, error = download(src["url"], path, src["sha256"], src["size"], deadline)
             entry.update(status="downloaded" if done else "failed", seconds=round(time.monotonic() - t, 2))
             if error:
                 entry["error"] = error
@@ -217,3 +254,10 @@ def ensure(sources_path, allow_download, budget_seconds=120):
     report["ok"] = ok
     report["seconds"] = round(time.monotonic() - t0, 2)
     return report
+
+
+# Run as a child of the probe, which kills it at a hard limit: name resolution
+# and TLS setup block in ways no per-read timeout covers.
+if __name__ == "__main__":
+    result = ensure(sys.argv[1], sys.argv[2] == "1", float(sys.argv[3]))
+    print("FETCH_JSON:" + json.dumps(result), flush=True)

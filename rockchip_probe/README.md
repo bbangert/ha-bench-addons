@@ -47,7 +47,10 @@ wheel is unzipped (never pip-installed, with a path-traversal check) into
 `/data/rknn/site-<hash>`, rebuilt from the verified wheel on every start
 rather than trusting an earlier tree, and the image's `/usr/lib/librknnrt.so` is a symlink
 that resolves into the verified copy. Downloads retry with backoff and share a
-120-second deadline. If `/data` is not writable the files go to a temporary
+120-second deadline that is checked on every socket read; a body larger than
+the size pinned in `RUNTIME_SOURCES` is refused, and the whole fetch runs in a
+child process that is killed 15 seconds past the deadline, so a stalled name
+lookup or handshake cannot hold up the other probes. If `/data` is not writable the files go to a temporary
 directory for that run, and the report says so. If `/data` is mounted
 `noexec`, it stays the verified download cache, and hash-checked copies of the
 runtime and the unpacked wheel are loaded from the container's own filesystem

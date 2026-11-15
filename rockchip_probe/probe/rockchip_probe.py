@@ -771,6 +771,18 @@ def publish():
     return snapshot, write_report(snapshot)
 
 
+def fetch_rknn(allow_download):
+    # In a child process with a hard kill, so a stalled DNS lookup or TLS
+    # handshake cannot hold the other probes beyond the fetch budget.
+    r = run([sys.executable, rknn_fetch.__file__, RUNTIME_SOURCES, "1" if allow_download else "0",
+             str(RKNN_FETCH_SECONDS)], timeout=RKNN_FETCH_SECONDS + 15)
+    found = [line[len("FETCH_JSON:"):] for line in r.get("stdout", "").splitlines() if line.startswith("FETCH_JSON:")]
+    if found:
+        return json.loads(found[-1])
+    return {"ok": False, "seconds": r.get("seconds"), "error": f"fetch process {failure_of(r)}",
+            "output": bound_text((r.get("stdout") or "") + (r.get("stderr") or ""))}
+
+
 def run_all():
     options, notes = load_options()
     soc = soc_info()
@@ -784,10 +796,7 @@ def run_all():
     unsupported = not soc["supported"] and not forced
     if "npu" in options["probes"] and not unsupported:
         log("fetching the RKNN files" if options["rknn_fetch"] else "checking the RKNN cache (rknn_fetch is false)")
-        try:
-            ctx["rknn"] = rknn_fetch.ensure(RUNTIME_SOURCES, options["rknn_fetch"], RKNN_FETCH_SECONDS)
-        except Exception as e:  # the other probes do not need these files
-            ctx["rknn"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        ctx["rknn"] = fetch_rknn(options["rknn_fetch"])
         log(f"RKNN files: {'ok' if ctx['rknn'].get('ok') else rknn_unavailable(ctx['rknn'])} "
             f"in {ctx['rknn'].get('seconds')} s")
         with REPORT_LOCK:
