@@ -22,7 +22,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = "/opt/rockchip-probe"
 DATA = "/data"
 PORT = 8000
+# Only what is stored in the report is bounded; probes parse the full output.
 OUTPUT_LIMIT = 20000
+LOG_LINES = 40
+RGA_RESULTS = "/tmp/rgaprobe-results.txt"
 
 ALL_PROBES = ["environment", "npu", "gpu", "vpu", "rga"]
 # The accelerator checks. environment alone proves nothing about them, so a
@@ -131,8 +134,8 @@ def run(cmd, timeout, env=None, sample=None, sample_every=0.5):
         t.join(timeout=2)
     result["rc"] = proc.returncode
     result["seconds"] = round(time.monotonic() - t0, 2)
-    result["stdout"] = b"".join(out).decode("utf-8", "replace")[-OUTPUT_LIMIT:]
-    result["stderr"] = b"".join(err).decode("utf-8", "replace")[-OUTPUT_LIMIT:]
+    result["stdout"] = b"".join(out).decode("utf-8", "replace")
+    result["stderr"] = b"".join(err).decode("utf-8", "replace")
     return result
 
 
@@ -555,8 +558,14 @@ def rga_verdict(results):
 
 
 def probe_rga(ctx):
-    r = run(["/usr/local/bin/rgaprobe"], timeout=240)
-    results, log_lines = parse_rgaprobe(r.get("stdout", ""))
+    # Results go to their own file because librga prints its log to stdout.
+    try:
+        os.unlink(RGA_RESULTS)
+    except OSError:
+        pass
+    r = run(["/usr/local/bin/rgaprobe", "--results", RGA_RESULTS], timeout=240)
+    results, _ = parse_rgaprobe(read_text(RGA_RESULTS, limit=1 << 24) or "")
+    _, log_lines = parse_rgaprobe(r.get("stdout", ""))
     raw = {
         "node": describe_node("/dev/rga"),
         "files": {p: read_text(p) for p in (
@@ -565,7 +574,7 @@ def probe_rga(ctx):
         "results": results,
         # librga logs its reasons for refusing a buffer (e.g. memory above
         # 4 GiB) itself; keep them verbatim.
-        "librga_log": (log_lines + (r.get("stderr") or "").splitlines())[-200:],
+        "librga_log": head_tail(log_lines + (r.get("stderr") or "").splitlines()),
         "process": {k: v for k, v in r.items() if k not in ("stdout", "stderr")},
     }
     problems, summary = rga_verdict(results)
@@ -596,6 +605,29 @@ PROBES = {"environment": probe_environment, "npu": probe_npu, "gpu": probe_gpu, 
           "rga": probe_rga}
 
 
+def head_tail(lines, n=LOG_LINES):
+    if len(lines) <= 2 * n:
+        return list(lines)
+    return lines[:n] + [f"... {len(lines) - 2 * n} lines omitted ..."] + lines[-n:]
+
+
+def bound_for_report(value):
+    """Shortens captured process output inside raw, keeping its head and tail."""
+    if isinstance(value, dict):
+        return {k: (bound_text(v) if k in ("stdout", "stderr") and isinstance(v, str) else bound_for_report(v))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [bound_for_report(v) for v in value]
+    return value
+
+
+def bound_text(text):
+    if len(text) <= OUTPUT_LIMIT:
+        return text
+    half = OUTPUT_LIMIT // 2
+    return text[:half] + f"\n... {len(text) - 2 * half} characters omitted ...\n" + text[-half:]
+
+
 def run_probe(name, ctx):
     started = now()
     t0 = time.monotonic()
@@ -606,7 +638,7 @@ def run_probe(name, ctx):
         status, detail, raw = "fail", f"probe crashed: {e!r}", {}
     log(f"{name}: {status} — {detail}")
     return {"name": name, "status": status, "detail": detail, "started_at": started, "finished_at": now(),
-            "seconds": round(time.monotonic() - t0, 2), "raw": raw}
+            "seconds": round(time.monotonic() - t0, 2), "raw": bound_for_report(raw)}
 
 
 def parse_options(text):
