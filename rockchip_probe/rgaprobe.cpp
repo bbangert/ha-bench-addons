@@ -800,6 +800,27 @@ static void run_cpu_letterbox() {
   emit("cpu-letterbox", "cpu", true, t, "", "the same letterbox in this tool's unoptimised single-threaded C++ reference, for scale only");
 }
 
+struct StressVerdict { bool ok; std::string why; size_t mismatched, zeroed; };
+
+// Equal checksums alone would pass jobs that write nothing or the same wrong
+// image every time, so the first output must pass the letterbox checker and
+// every later one must equal it, and none may equal the zeroed buffer.
+static StressVerdict stress_verdict(bool first_correct, const std::string &first_detail,
+                                    const std::vector<uint64_t> &sums, uint64_t zero_sum, int failures) {
+  StressVerdict v{false, "", 0, 0};
+  for (uint64_t x : sums) {
+    v.mismatched += !sums.empty() && x != sums[0];
+    v.zeroed += x == zero_sum;
+  }
+  if (sums.empty()) v.why = "no job completed";
+  else if (!first_correct) v.why = "first output failed the letterbox check: " + first_detail;
+  else if (v.zeroed) v.why = std::to_string(v.zeroed) + " outputs were still the zeroed buffer";
+  else if (v.mismatched) v.why = std::to_string(v.mismatched) + " outputs differ from the first, verified one";
+  else if (failures) v.why = std::to_string(failures) + " jobs failed";
+  else v.ok = true;
+  return v;
+}
+
 static void run_stress(int jobs) {
   const int sw = 1920, sh = 1080, dw = 640, dh = 640;
   Bytes src = rgba_to_nv12(pattern_rgba(sw, sh), sw, sh);
@@ -810,14 +831,17 @@ static void run_stress(int jobs) {
   in->write(src);
   rga_buffer_t s = wrap(in, sw, sh, RK_FORMAT_YCbCr_420_SP);
   rga_buffer_t d = wrap(out, dw, dh, RK_FORMAT_RGB_888);
-  std::set<uint64_t> sums;
+  Bytes zero(out_size, 0);
+  const uint64_t zero_sum = fnv1a(zero.data(), zero.size());
+  std::vector<uint64_t> sums;
+  bool first_correct = false;
+  std::string first_detail, first_error;
   int failures = 0;
-  std::string first_error;
   Timing t;
   t.min = 1e9;
   double total = 0;
   for (int i = 0; i < jobs; i++) {
-    out->fill(0);  // a job that silently does nothing must change the checksum
+    out->fill(0);
     double t0 = now_ms();
     IM_STATUS st = letterbox_job(s, d, sw, sh, dw, dh, IM_YUV_TO_RGB_BT601_LIMIT);
     double dt = now_ms() - t0;
@@ -828,13 +852,23 @@ static void run_stress(int jobs) {
     }
     total += dt, t.n++, t.min = std::min(t.min, dt), t.max = std::max(t.max, dt);
     Bytes got = out->read(out_size);
-    sums.insert(fnv1a(got.data(), got.size()));
+    if (sums.empty()) {
+      LetterboxResult r = check_letterbox(src, got, sw, sh, dw, dh, false);
+      first_correct = r.ok;
+      first_detail = r.detail;
+    }
+    sums.push_back(fnv1a(got.data(), got.size()));
   }
   t.mean = t.n ? total / t.n : 0;
   if (!t.n) t.min = 0;
-  emit("stress", "system", failures == 0 && sums.size() == 1, t,
-       "jobs=" + std::to_string(jobs) + " failures=" + std::to_string(failures) + " checksums=" + std::to_string(sums.size()),
+  StressVerdict v = stress_verdict(first_correct, first_detail, sums, zero_sum, failures);
+  std::set<uint64_t> distinct(sums.begin(), sums.end());
+  emit("stress", "system", v.ok, t,
+       "jobs=" + std::to_string(jobs) + " failures=" + std::to_string(failures) + " checksums=" +
+           std::to_string(distinct.size()) + " first_verified=" + std::to_string(first_correct ? 1 : 0) +
+           " zeroed=" + std::to_string(v.zeroed) + " mismatched=" + std::to_string(v.mismatched),
        std::to_string(jobs) + " consecutive bt601-limited letterbox jobs on dma-heap system buffers" +
+           (v.ok ? "; first output verified, all outputs identical to it" : "; " + v.why) +
            (first_error.empty() ? "" : "; first failure " + first_error));
   delete in, delete out;
 }
@@ -931,6 +965,17 @@ static void selftest() {
   check("pad-colour-packing", (grey & 0xff) == PAD && (grey >> 8 & 0xff) == PAD && (grey >> 16 & 0xff) == PAD && (grey >> 24) == PAD,
         "the pad colour is 114 in every byte");
   Bytes ref601 = nv12_to_rgb888(nv, 192, 108, false);
+  std::vector<uint64_t> same(5, 42), zeros(5, 7), drift = {42, 42, 43, 42};
+  check("stress-good", stress_verdict(true, "", same, 7, 0).ok, "verified first output, all identical");
+  check("stress-rejects-zero-output", !stress_verdict(true, "", zeros, 7, 0).ok,
+        "jobs that leave the zeroed buffer fail even when the checksums agree");
+  check("stress-rejects-consistently-wrong", !stress_verdict(false, "pad wrong", same, 7, 0).ok,
+        "identical outputs fail when the first one fails the letterbox check");
+  check("stress-rejects-drift", !stress_verdict(true, "", drift, 7, 0).ok, "one differing output fails");
+  check("stress-rejects-failed-jobs", !stress_verdict(true, "", same, 7, 2).ok, "failed jobs fail");
+  Bytes zero_out((size_t)64 * 64 * 3, 0);
+  check("stress-first-check-zero", !check_letterbox(nv, zero_out, 192, 108, 64, 64, false).ok,
+        "an all-zero letterbox output fails the checker the stress run uses");
   check("swap-detect", compare(ref601.data(), swap_rb(ref601).data(), ref601.size()).mae > 10,
         "an R/B swap is far outside the cvtcolor threshold");
 }

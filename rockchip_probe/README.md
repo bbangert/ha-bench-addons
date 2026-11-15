@@ -108,7 +108,7 @@ prints its log to stdout:
 | `fill` | `imfill` of an RGBA rect: uniform inside, nothing changed outside; reports the byte order the colour lands in |
 | `fill-rgb888` | the same on RGB888; reports which three bytes of the 32-bit colour land in memory |
 | `cpu-letterbox` | the same letterbox on the CPU (the tool's plain reference code), for scale |
-| `stress` | 500 consecutive letterbox jobs on dma-heap `system` buffers; gates on no failed job and exactly one distinct output checksum |
+| `stress` | 500 consecutive letterbox jobs on dma-heap `system` buffers, each into a zeroed output; the first output must pass the letterbox check, every later one must be identical to it, none may still be the zeroed buffer, and no job may fail |
 
 The input is a structured pattern (gradients, colour bars, hard lines and a
 checker block), not noise, so a wrong kernel, offset or channel order stands
