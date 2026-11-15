@@ -20,6 +20,8 @@ import time
 import numpy as np
 from PIL import Image
 
+import finite
+
 # sha256 of the RGB pixels OpenCV decodes from space_shuttle_224.jpg, which is
 # what the official test.py feeds the model.
 EXPECTED_INPUT_SHA256 = "f36e0734e1f08d3ef7d380ee568fee2daa12b6c0e26d7446da9278ccb66e35f2"
@@ -50,7 +52,11 @@ def top5(output, labels):
 
 
 def emit(result):
-    print("RESULT_JSON:" + json.dumps(result), flush=True)
+    print("RESULT_JSON:" + finite.dumps(result), flush=True)
+
+
+def non_finite_count(output):
+    return int(np.size(output) - np.count_nonzero(np.isfinite(np.asarray(output, dtype=np.float64))))
 
 
 def run(args):
@@ -87,18 +93,21 @@ def run(args):
         result["error"] = "inference returned no outputs"
         emit(result)
         return 1
+    result["non_finite_outputs"] = non_finite_count(outputs[0])
     result["top5"] = top5(outputs[0], labels)
     emit(result)
 
     if args.loop_seconds > 0:
         top1 = result["top5"][0]["index"]
-        times, mismatches = [], 0
+        times, mismatches, non_finite = [], 0, 0
         start = time.monotonic()
         deadline = start + args.loop_seconds
         while time.monotonic() < deadline:
             t0 = time.perf_counter()
             out = rk.inference(inputs=[batch])
             times.append((time.perf_counter() - t0) * 1000)
+            if out is not None and non_finite_count(out[0]):
+                non_finite += 1
             if out is None or int(np.argmax(out[0])) != top1:
                 mismatches += 1
         wall = time.monotonic() - start
@@ -110,6 +119,7 @@ def run(args):
             "ms_avg": round(sum(times) / len(times), 2) if times else None,
             "ms_max": round(max(times), 2) if times else None,
             "top1_mismatches": mismatches,
+            "non_finite_inferences": non_finite,
         }
         emit(result)
 

@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 
+import finite
 import rknn_fetch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -307,6 +308,22 @@ def npu_loop_problems(result, loop_seconds):
         problems.append("loop completed zero inferences")
     if loop.get("top1_mismatches", 0) > 0:
         problems.append(f"loop TOP1 changed in {loop['top1_mismatches']} of {loop.get('inferences')} inferences")
+    if loop.get("non_finite_inferences", 0) > 0:
+        problems.append(f"loop produced non-finite outputs in {loop['non_finite_inferences']} inferences")
+    return problems
+
+
+def non_finite_problems(result, top):
+    # NaN compares false with everything, so a NaN score could otherwise sit
+    # behind a correct-looking class index.
+    problems = []
+    if result.get("non_finite_outputs"):
+        problems.append(f"reference inference produced {result['non_finite_outputs']} non-finite output values")
+    scores = [t.get("score") for t in top]
+    if any(not isinstance(v, (int, float)) or v != v or v in (float("inf"), float("-inf")) for v in scores):
+        problems.append(f"TOP5 scores are not all finite: {scores}")
+    if result.get("non_finite_values"):
+        problems.append("non-finite numbers in the worker result: " + "; ".join(result["non_finite_values"][:5]))
     return problems
 
 
@@ -358,8 +375,13 @@ def probe_npu(ctx):
              "--labels", paths["labels"], "--loop-seconds", str(loop_seconds)],
             timeout=loop_seconds + 60, env=env, sample=sample)
     text = output_of(r)
-    results = [json.loads(line[len("RESULT_JSON:"):]) for line in r.get("stdout", "").splitlines()
-               if line.startswith("RESULT_JSON:")]
+    results = []
+    for line in r.get("stdout", "").splitlines():
+        if line.startswith("RESULT_JSON:"):
+            try:
+                results.append(json.loads(line[len("RESULT_JSON:"):]))
+            except ValueError as e:
+                results.append({"error": f"unparseable worker result: {e}"})
     result = results[-1] if results else {}
 
     runtime = re.search(r"librknnrt version:\s*(\S+)", text)
@@ -392,6 +414,7 @@ def probe_npu(ctx):
     elif indices[0] != EXPECTED_TOP5[0] or set(indices) != set(EXPECTED_TOP5):
         problems.append(f"TOP5 {indices} != expected {EXPECTED_TOP5}")
     if top:
+        problems += non_finite_problems(result, top)
         problems += npu_loop_problems(result, loop_seconds)
 
     parts = []
@@ -766,7 +789,7 @@ def overall_status(probes, unsupported):
 
 
 def write_report(report):
-    body = json.dumps(report)
+    body = finite.dumps(report)
     for directory in (DATA, "/tmp"):
         try:
             tmp = os.path.join(directory, "report.json.tmp")
@@ -783,7 +806,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/report.json"):
             with REPORT_LOCK:
-                body = json.dumps(REPORT, indent=2).encode()
+                body = finite.dumps(REPORT, indent=2).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
         elif self.path == "/healthz":
@@ -805,7 +828,7 @@ class Handler(BaseHTTPRequestHandler):
 def publish():
     """Snapshots the live report to disk, so the file never shows an earlier run's result."""
     with REPORT_LOCK:
-        snapshot = json.loads(json.dumps(REPORT))
+        snapshot = json.loads(finite.dumps(REPORT))
     return snapshot, write_report(snapshot)
 
 
@@ -885,7 +908,7 @@ def main():
         log(f"error: {e!r}")
     final, path = publish()
     log(f"report at {path} and http://<host>:<mapped port>/report.json")
-    print(json.dumps(final), flush=True)
+    print(finite.dumps(final), flush=True)
 
     while True:
         signal.pause()
