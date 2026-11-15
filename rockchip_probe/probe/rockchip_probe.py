@@ -311,7 +311,8 @@ def probe_npu(ctx):
     paths = {"model": os.path.join(npu, "resnet18_for_rk3566_rk3568.rknn"),
              "image": os.path.join(npu, "space_shuttle_224.jpg"),
              "labels": os.path.join(npu, "synset_label.py")}
-    rknn_env = {"PYTHONPATH": rknn["site_dir"], "LIBRKNNRT_PATH": os.path.join(npu, "librknnrt.so")}
+    rknn_env = {"PYTHONPATH": rknn["site_dir"],
+                "LIBRKNNRT_PATH": os.path.join(rknn.get("exec_dir", npu), "librknnrt.so")}
     check = run([sys.executable, worker, "--selfcheck", "--image", paths["image"]], timeout=60, env=rknn_env)
     selfcheck = next((json.loads(line[len("SELFCHECK_JSON:"):]) for line in check.get("stdout", "").splitlines()
                       if line.startswith("SELFCHECK_JSON:")), {})

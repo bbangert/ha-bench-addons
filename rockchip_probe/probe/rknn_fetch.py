@@ -14,6 +14,8 @@ import zipfile
 LINK_DIR = "/var/lib/rockchip-probe/rknn"  # /usr/lib/librknnrt.so points into this
 PERSISTENT_DIR = "/data/rknn"
 FALLBACK_DIR = "/tmp/rockchip-probe-rknn"
+# Where the runtime and the unpacked wheel go when the cache cannot map code.
+EXEC_DIRS = ("/var/lib/rockchip-probe/rknn-exec", "/tmp/rockchip-probe-rknn-exec")
 WHEEL_NAME = "rknn-toolkit-lite2"
 
 
@@ -48,6 +50,30 @@ def choose_dir():
         except OSError as e:
             last = e
     raise OSError(f"no writable directory for the RKNN files: {last}")
+
+
+def noexec(directory):
+    return bool(os.statvfs(directory).f_flag & os.ST_NOEXEC)
+
+
+def choose_exec_dir():
+    for directory in EXEC_DIRS:
+        try:
+            os.makedirs(directory, exist_ok=True)
+            if not noexec(directory):
+                return directory
+        except OSError:
+            continue
+    raise OSError(f"no exec-capable directory among {', '.join(EXEC_DIRS)}")
+
+
+def copy_verified(src, dest, sha):
+    tmp = f"{dest}.part-{os.getpid()}"
+    shutil.copyfile(src, tmp)
+    if sha256_of(tmp) != sha:
+        os.unlink(tmp)
+        raise ValueError(f"copy of {os.path.basename(src)} failed its sha256 check")
+    os.replace(tmp, dest)
 
 
 def download(url, dest, sha, deadline, attempts=3):
@@ -160,10 +186,23 @@ def ensure(sources_path, allow_download, budget_seconds=120):
     if ok:
         try:
             wheel = next(s for s in report["files"] if s["name"] == WHEEL_NAME)
-            report["site_dir"], report["wheel"] = unpack_wheel(
-                os.path.join(directory, wheel["file"]), wheel["sha256"], directory)
-            point_link(directory)
-            report["link"] = f"{LINK_DIR} -> {directory}"
+            runtime = next(s for s in report["files"] if s["file"] == "librknnrt.so")
+            exec_dir = directory
+            # A noexec mount (a tmpfs /data, say) stores the files fine but
+            # cannot mmap them as code, so the loadable parts move elsewhere.
+            if noexec(directory):
+                exec_dir = choose_exec_dir()
+                copy_verified(os.path.join(directory, runtime["file"]), os.path.join(exec_dir, runtime["file"]),
+                              runtime["sha256"])
+                why = f"{directory} is mounted noexec; runtime and unpacked wheel are loaded from {exec_dir}"
+                report["note"] = f"{report['note']}; {why}" if report.get("note") else why
+            wheel_path = os.path.join(directory, wheel["file"])
+            if sha256_of(wheel_path) != wheel["sha256"]:
+                raise ValueError("wheel changed after verification")
+            report["exec_dir"] = exec_dir
+            report["site_dir"], report["wheel"] = unpack_wheel(wheel_path, wheel["sha256"], exec_dir)
+            point_link(exec_dir)
+            report["link"] = f"{LINK_DIR} -> {exec_dir}"
         except Exception as e:
             ok = False
             report["error"] = f"{type(e).__name__}: {e}"

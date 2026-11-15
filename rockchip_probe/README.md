@@ -47,7 +47,10 @@ wheel is unzipped (never pip-installed, with a path-traversal check) into
 `/data/rknn/site-<hash>`, and the image's `/usr/lib/librknnrt.so` is a symlink
 that resolves into the verified copy. Downloads retry with backoff and share a
 120-second deadline. If `/data` is not writable the files go to a temporary
-directory for that run, and the report says so.
+directory for that run, and the report says so. If `/data` is mounted
+`noexec`, it stays the verified download cache, and hash-checked copies of the
+runtime and the unpacked wheel are loaded from the container's own filesystem
+instead (`exec_dir` and `note` in the report).
 
 The report lists every file with its URL, expected sha256 and whether it was
 `cached`, `downloaded` or `failed` (with the error), plus the fetch time. A
