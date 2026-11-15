@@ -1,5 +1,8 @@
 """Runs the official rknn-toolkit-lite2 resnet18 example in its own process.
 
+The RKNN files are fetched and hash-checked by the parent before this runs;
+rknnlite is imported from the unpacked wheel on PYTHONPATH.
+
 The parent captures this process's stdout/stderr, which is where librknnrt
 writes its runtime and driver version lines, and can kill it if the driver
 hangs. Results are emitted as `RESULT_JSON:` lines; the last one wins, so a
@@ -10,6 +13,7 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 import sys
 import time
 
@@ -113,8 +117,35 @@ def run(args):
     return 0
 
 
+def selfcheck(image, runtime):
+    import ctypes
+    import re
+
+    out = {}
+    try:
+        import rknnlite.api  # noqa: F401
+        out["rknnlite"] = os.path.dirname(rknnlite.api.__file__)
+    except Exception as e:
+        out["rknnlite_error"] = repr(e)
+    try:
+        ctypes.CDLL(runtime)
+        out["runtime_loaded"] = os.path.realpath(runtime)
+        m = re.search(rb"librknnrt version: [^)\x00]*\)", open(runtime, "rb").read())
+        out["runtime_version"] = m.group(0).decode() if m else None
+    except Exception as e:
+        out["runtime_error"] = repr(e)
+    digest = hashlib.sha256(load_input(image).tobytes()).hexdigest()
+    out["input_sha256"] = digest
+    out["input_matches_official_decode"] = digest == EXPECTED_INPUT_SHA256
+    out["ok"] = "rknnlite" in out and "runtime_loaded" in out and out["input_matches_official_decode"]
+    print("SELFCHECK_JSON:" + json.dumps(out), flush=True)
+    return 0 if out["ok"] else 1
+
+
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--selfcheck", action="store_true")
+    p.add_argument("--runtime", default="/usr/lib/librknnrt.so")
     p.add_argument("--check-input")
     p.add_argument("--model")
     p.add_argument("--image")
@@ -122,6 +153,8 @@ def main():
     p.add_argument("--loop-seconds", type=float, default=0)
     args = p.parse_args()
 
+    if args.selfcheck:
+        return selfcheck(args.image, args.runtime)
     if args.check_input:
         digest = hashlib.sha256(load_input(args.check_input).tobytes()).hexdigest()
         print(f"decoded input sha256 {digest}")

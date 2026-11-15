@@ -17,6 +17,8 @@ import subprocess
 import sys
 import threading
 import time
+
+import rknn_fetch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = "/opt/rockchip-probe"
@@ -37,7 +39,9 @@ RGA_CASES = ("copy", "resize-nv12", "resize-rgba", "cvtcolor-bt601-limited", "cv
 # that is not physically contiguous, so va/va-wrap are reported like the other
 # heaps (see the README).
 RGA_GATING_BUFFERS = ("system",)
-DEFAULT_OPTIONS = {"probes": list(ALL_PROBES), "npu_loop_seconds": 10}
+DEFAULT_OPTIONS = {"probes": list(ALL_PROBES), "npu_loop_seconds": 10, "rknn_fetch": True}
+RUNTIME_SOURCES = os.path.join(ROOT, "RUNTIME_SOURCES")
+RKNN_FETCH_SECONDS = 120
 ENCODE_FRAMES = 30
 SUPPORTED_SOCS = ("rockchip,rk3566", "rockchip,rk3568")
 
@@ -255,7 +259,9 @@ def probe_environment(ctx):
         "proc": {p: os.path.exists(p) for p in ("/proc/rknpu", "/proc/mpp_service", "/proc/rkrga")},
         "debugfs_mounted": os.path.isdir("/sys/kernel/debug/rknpu") or os.path.isdir("/sys/kernel/debug/rkrga"),
         "uid": os.getuid(),
+        "rknn_files": ctx.get("rknn"),
         "image": {"app_version": app_version(), "components": components(),
+                  "fetched_at_start": rknn_fetch.read_sources(RUNTIME_SOURCES),
                   "clips": json.loads(read_text(os.path.join(ROOT, "clips", "clips.json")) or "{}")},
     }
     present = [n["path"] for n in raw["devices"] if n.get("present")]
@@ -287,8 +293,31 @@ def npu_loop_problems(result, loop_seconds):
     return problems
 
 
+def rknn_unavailable(rknn):
+    if not rknn:
+        return "RKNN files were not fetched"
+    reasons = [f"{f['file']}: {f.get('error', f['status'])}" for f in rknn.get("files", []) if f["status"] == "failed"]
+    if rknn.get("error"):
+        reasons.append(rknn["error"])
+    return "; ".join(reasons) or "unknown"
+
+
 def probe_npu(ctx):
-    npu = os.path.join(ROOT, "npu")
+    rknn = ctx.get("rknn") or {}
+    if not rknn.get("ok"):
+        return "fail", f"RKNN files not available: {rknn_unavailable(rknn)}", {"rknn_files": rknn}
+    npu = rknn["directory"]
+    worker = os.path.join(ROOT, "npu_worker.py")
+    paths = {"model": os.path.join(npu, "resnet18_for_rk3566_rk3568.rknn"),
+             "image": os.path.join(npu, "space_shuttle_224.jpg"),
+             "labels": os.path.join(npu, "synset_label.py")}
+    rknn_env = {"PYTHONPATH": rknn["site_dir"], "LIBRKNNRT_PATH": os.path.join(npu, "librknnrt.so")}
+    check = run([sys.executable, worker, "--selfcheck", "--image", paths["image"]], timeout=60, env=rknn_env)
+    selfcheck = next((json.loads(line[len("SELFCHECK_JSON:"):]) for line in check.get("stdout", "").splitlines()
+                      if line.startswith("SELFCHECK_JSON:")), {})
+    if not selfcheck.get("ok"):
+        return "fail", f"RKNN self-check failed after fetch: {selfcheck or failure_of(check)}", {
+            "rknn_files": rknn, "selfcheck": selfcheck, "selfcheck_process": check}
     loop_seconds = ctx["options"]["npu_loop_seconds"]
     load_file = next((p for p in NPU_LOAD_FILES if read_text(p) is not None), None)
     samples = []
@@ -303,13 +332,12 @@ def probe_npu(ctx):
     # NPU_DRIVER_NODE (default /dev/dri/renderD129) exists, so point it at the
     # node sysfs says is the NPU.
     npu_nodes = [f"/dev/dri/{n}" for n, drv in drm_sysfs().items() if (drv or "").lower() == "rknpu"]
-    env = {"NPU_DRIVER_NODE": next((n for n in npu_nodes if "renderD" in n), npu_nodes[0])} if npu_nodes else None
+    env = dict(rknn_env)
+    if npu_nodes:
+        env["NPU_DRIVER_NODE"] = next((n for n in npu_nodes if "renderD" in n), npu_nodes[0])
 
-    r = run([sys.executable, os.path.join(ROOT, "npu_worker.py"),
-             "--model", os.path.join(npu, "resnet18_for_rk3566_rk3568.rknn"),
-             "--image", os.path.join(npu, "space_shuttle_224.jpg"),
-             "--labels", os.path.join(npu, "synset_label.py"),
-             "--loop-seconds", str(loop_seconds)],
+    r = run([sys.executable, worker, "--model", paths["model"], "--image", paths["image"],
+             "--labels", paths["labels"], "--loop-seconds", str(loop_seconds)],
             timeout=loop_seconds + 60, env=env, sample=sample)
     text = output_of(r)
     results = [json.loads(line[len("RESULT_JSON:"):]) for line in r.get("stdout", "").splitlines()
@@ -324,6 +352,8 @@ def probe_npu(ctx):
     max_load = max((v for s in samples for v in s["load_percent"]), default=None)
     raw = {
         "npu_drm_nodes": npu_nodes,
+        "rknn_files": {k: v for k, v in rknn.items() if k != "files"},
+        "selfcheck": selfcheck,
         "runtime_version": runtime.group(1) if runtime else None,
         "driver_version": driver.group(1) if driver else None,
         "kernel_version_file": {"path": version_file, "text": version_text},
@@ -667,6 +697,12 @@ def parse_options(text):
         opts["npu_loop_seconds"] = max(0, min(120, int(seconds)))
     else:
         notes.append(f"npu_loop_seconds {seconds!r} is not a finite number; using the default")
+
+    fetch = given.get("rknn_fetch", opts["rknn_fetch"])
+    if isinstance(fetch, bool):
+        opts["rknn_fetch"] = fetch
+    else:
+        notes.append(f"rknn_fetch {fetch!r} is not a boolean; using the default")
     return opts, notes
 
 
@@ -745,6 +781,17 @@ def run_all():
 
     ctx = {"options": options, "soc": soc}
     unsupported = not soc["supported"] and not forced
+    if "npu" in options["probes"] and not unsupported:
+        log("fetching the RKNN files" if options["rknn_fetch"] else "checking the RKNN cache (rknn_fetch is false)")
+        try:
+            ctx["rknn"] = rknn_fetch.ensure(RUNTIME_SOURCES, options["rknn_fetch"], RKNN_FETCH_SECONDS)
+        except Exception as e:  # the other probes do not need these files
+            ctx["rknn"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        log(f"RKNN files: {'ok' if ctx['rknn'].get('ok') else rknn_unavailable(ctx['rknn'])} "
+            f"in {ctx['rknn'].get('seconds')} s")
+        with REPORT_LOCK:
+            REPORT["rknn_files"] = ctx["rknn"]
+        publish()
     reason = "unsupported SoC: " + (", ".join(soc["compatible"]) or "device tree not readable")
     for name in options["probes"]:
         if unsupported and name != "environment":

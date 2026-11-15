@@ -1,12 +1,7 @@
-# Every third-party input of the image: <name> <version> <sha256> <file> <url>
+# Every third-party input of the image build: <name> <version> <sha256> <file> <url>
 # The build fails if any download does not match its hash. URLs name commits,
-# never branches, so a moved branch cannot change what gets built.
-librknnrt 2.3.2 d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac738e8 librknnrt.so https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so
-rknn-toolkit-lite2 2.3.2 bda74f1179e15fccb8726054a24898982522784b65bb340b20146955d254e800 rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/rknn-toolkit-lite2/packages/rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-resnet18-model 2.3.2 bccc0899044ca6edaa8bef24f4dd8020c19625f7faa02c5a4a8ea823e186ca14 resnet18_for_rk3566_rk3568.rknn https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/rknn-toolkit-lite2/examples/resnet18/resnet18_for_rk3566_rk3568.rknn
-resnet18-image 2.3.2 a827cc9060d15cd34b1b5ac512f4d6d8366416a5874a2075951991cbacef78d4 space_shuttle_224.jpg https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/rknn-toolkit-lite2/examples/resnet18/space_shuttle_224.jpg
-resnet18-labels 2.3.2 ef850970a2b9b2baf7271cabd40b2b54945aee9fd7cfdd70289188ce25185495 synset_label.py https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/rknn-toolkit-lite2/examples/resnet18/synset_label.py
-rknn-toolkit2-license 2.3.2 d846f57d942c7dfdca7b8b54f9e8bb39e1e226790dc4f5ee205d6fd678961720 rknn-toolkit2-LICENSE.txt https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/LICENSE
+# never branches, so a moved branch cannot change what gets built. Files the
+# app fetches at first start instead are in RUNTIME_SOURCES.
 libmali g29p1-12eac0 02d42b4a49007d8b99865653105783034df9adbd502ccef035038a0c3756c027 libmali-bifrost-g52-g29p1-gles.so https://raw.githubusercontent.com/JeffyCN/mirrors/bf621d15f009509557d6b28f81427651695cac20/lib/aarch64-linux-gnu/libmali-bifrost-g52-g29p1-gles.so
 libmali-license g29p1-12eac0 a78acc73de9909efb879800d4daa4640c4aaa55cd751238a133954aba15e4285 libmali-END_USER_LICENCE_AGREEMENT.txt https://raw.githubusercontent.com/JeffyCN/mirrors/bf621d15f009509557d6b28f81427651695cac20/END_USER_LICENCE_AGREEMENT.txt
 mpp 1.1.0 82da3d7ea5926021d48fcaf56cde2e6cb39c3eaad11e06f3cf2a9bfbb3133852 mpp.tar.gz https://github.com/rockchip-linux/mpp/archive/c08762ebfadeb4e986d2fed993bc7a54862d3ebe.tar.gz

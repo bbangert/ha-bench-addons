@@ -48,7 +48,9 @@ options:
     - vpu
     - rga
   npu_loop_seconds: 10
+  rknn_fetch: true
 schema:
   probes:
     - list(environment|npu|gpu|vpu|rga)
   npu_loop_seconds: int(0,120)
+  rknn_fetch: bool

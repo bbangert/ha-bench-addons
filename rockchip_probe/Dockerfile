@@ -1,5 +1,6 @@
-# Debian rather than Alpine: librknnrt.so and libmali are glibc-only, and
-# bookworm's Python 3.11 is one the rknn-toolkit-lite2 2.3.2 wheels are built for.
+# Debian rather than Alpine: libmali and the RKNN runtime fetched at first start
+# are glibc-only, and bookworm's Python 3.11 is one the rknn-toolkit-lite2 2.3.2
+# wheels are built for.
 # Pinned by index digest (multi-arch); the probe itself is arm64-only.
 ARG DEBIAN=debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 
@@ -20,7 +21,6 @@ RUN set -eu; \
 # upstream texts of exactly the inputs built here.
 RUN set -eu; \
     mkdir mpp && tar -xzf mpp.tar.gz -C mpp --strip-components=1; \
-    cmp rknn-toolkit2-LICENSE.txt licenses-repo/rknn-toolkit2-LICENSE.txt; \
     cmp libmali-END_USER_LICENCE_AGREEMENT.txt licenses-repo/libmali-END_USER_LICENCE_AGREEMENT.txt; \
     cmp mpp/LICENSES/Apache-2.0 licenses-repo/mpp-Apache-2.0.txt; \
     cmp mpp/LICENSES/MIT licenses-repo/mpp-MIT.txt; \
@@ -83,16 +83,16 @@ RUN set -eu; \
 FROM ${DEBIAN}
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 python3-numpy python3-psutil python3-ruamel.yaml python3-pil libdrm2 \
+      ca-certificates python3 python3-numpy python3-psutil python3-ruamel.yaml python3-pil libdrm2 \
  && rm -rf /var/lib/apt/lists/*
 
-# rknnlite loads the runtime from this exact path.
-COPY --from=fetch /src/librknnrt.so /usr/lib/librknnrt.so
-# A wheel is a zip; extracting it avoids shipping pip. Its declared deps
-# (numpy, psutil, ruamel.yaml) come from Debian above.
-RUN --mount=type=bind,from=fetch,source=/src,target=/src \
-    python3 -m zipfile -e /src/rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl \
-      /usr/local/lib/python3.11/dist-packages/
+# The RKNN runtime, lite wheel and example are not in the image: the app
+# fetches them at first start (RUNTIME_SOURCES). rknnlite loads the runtime from
+# this exact path, which resolves once the app points the directory link at its
+# verified download. The wheel's declared deps (numpy, psutil, ruamel.yaml)
+# come from Debian above.
+RUN mkdir -p /var/lib/rockchip-probe \
+ && ln -s /var/lib/rockchip-probe/rknn/librknnrt.so /usr/lib/librknnrt.so
 
 # The blob is EGL, GLES and GBM in one library; the usual sonames point at it
 # so anything linked the ordinary way finds it. No Mesa is installed to compete.
@@ -107,23 +107,21 @@ COPY --from=build /out/usr/local/bin/mpp_info_test /out/usr/local/bin/mpi_dec_te
 RUN ldconfig
 
 COPY --from=clips /clips /opt/rockchip-probe/clips
-COPY --from=fetch /src/resnet18_for_rk3566_rk3568.rknn /src/space_shuttle_224.jpg /src/synset_label.py \
-     /opt/rockchip-probe/npu/
 COPY licenses /licenses
-COPY SOURCES config.yaml /opt/rockchip-probe/
+COPY SOURCES RUNTIME_SOURCES config.yaml /opt/rockchip-probe/
 COPY probe/ /opt/rockchip-probe/
 
-# Fail the build, not the bench run, on a missing library. The decoded test
-# image must also be bit-identical to what the official example feeds the model
-# (it decodes with OpenCV; this image uses Pillow).
+# Fail the build, not the bench run, on a missing library. The RKNN checks
+# (import, runtime load, decoded test image) run after the first-start fetch
+# and are recorded in the report.
 RUN set -eu; \
     for f in /usr/local/bin/eglprobe /usr/local/bin/mpp_info_test /usr/local/bin/mpi_dec_test \
-             /usr/local/bin/mpi_enc_test /usr/local/bin/rgaprobe /usr/lib/librknnrt.so; do \
+             /usr/local/bin/mpi_enc_test /usr/local/bin/rgaprobe; do \
       if ldd "$f" | grep -q 'not found'; then ldd "$f"; exit 1; fi; \
     done; \
-    python3 -c 'import rknnlite.api'; \
     rgaprobe --selftest; \
-    python3 /opt/rockchip-probe/npu_worker.py --check-input /opt/rockchip-probe/npu/space_shuttle_224.jpg
+    python3 -c 'import numpy, psutil, ruamel.yaml, PIL'; \
+    python3 -c 'import sys; sys.path.insert(0, "/opt/rockchip-probe"); import rknn_fetch' 
 
 EXPOSE 8000
 CMD ["python3", "-u", "/opt/rockchip-probe/rockchip_probe.py"]

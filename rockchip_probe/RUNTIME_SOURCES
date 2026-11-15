@@ -1,0 +1,8 @@
+# Files the app downloads at first start and never ships: <name> <version> <sha256> <file> <url>
+# Rockchip publishes them without a redistribution grant, so the image only
+# carries this list; each file is used only after its sha256 matches.
+librknnrt 2.3.2 d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac738e8 librknnrt.so https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so
+rknn-toolkit-lite2 2.3.2 bda74f1179e15fccb8726054a24898982522784b65bb340b20146955d254e800 rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/rknn-toolkit-lite2/packages/rknn_toolkit_lite2-2.3.2-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+resnet18-model 2.3.2 bccc0899044ca6edaa8bef24f4dd8020c19625f7faa02c5a4a8ea823e186ca14 resnet18_for_rk3566_rk3568.rknn https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/rknn-toolkit-lite2/examples/resnet18/resnet18_for_rk3566_rk3568.rknn
+resnet18-image 2.3.2 a827cc9060d15cd34b1b5ac512f4d6d8366416a5874a2075951991cbacef78d4 space_shuttle_224.jpg https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/rknn-toolkit-lite2/examples/resnet18/space_shuttle_224.jpg
+resnet18-labels 2.3.2 ef850970a2b9b2baf7271cabd40b2b54945aee9fd7cfdd70289188ce25185495 synset_label.py https://raw.githubusercontent.com/airockchip/rknn-toolkit2/42aa1d426c0a9e0869b6374edba009f7208a1926/rknn-toolkit-lite2/examples/resnet18/synset_label.py
