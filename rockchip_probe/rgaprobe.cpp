@@ -1,11 +1,12 @@
 // rgaprobe: does the RGA 2D accelerator produce correct output through librga's
 // im2d API, for each kind of buffer an app can hand it?
 //
-//   rgaprobe [--buffers system,va,...] [--iterations N] [--stress N]
+//   rgaprobe [--results FILE] [--buffers system,va,...] [--iterations N] [--stress N]
 //   rgaprobe --selftest
 //
 // One line per result: `case=<name> buf=<buffer> ok=0|1 ms=<mean> ... detail=<text>`.
-// detail is always last and runs to the end of the line. Every RGA result is
+// detail is always last and runs to the end of the line. librga logs with
+// printf to stdout, so --results sends these lines to a file of their own. Every RGA result is
 // checked against a CPU reference computed here, so a job that "succeeds" but
 // writes the wrong pixels fails. Jobs are synchronous and nothing waits on
 // input; a wedged driver is the caller's timeout to handle.
@@ -341,6 +342,11 @@ static rga_buffer_t wrap(Buf *b, int w, int h, int format) {
 
 
 static bool g_all_ok = true;
+static FILE *g_results = stdout;
+// User memory either works or is refused by the driver for every job; once a
+// case fails on it, the rest are reported without submitting more jobs, each
+// of which makes librga print a long error table.
+static std::map<std::string, std::string> g_refused;
 // Only dma-heap system buffers gate: on RK356x the vendor driver refuses
 // non-contiguous user memory for RGA2 (see the README).
 static std::set<std::string> g_gating_buffers = {"system"};
@@ -349,12 +355,20 @@ struct Timing { double mean = 0, min = 0, max = 0; int n = 0; };
 
 static void emit(const std::string &name, const std::string &buf, bool ok, const Timing &t,
                  const std::string &extra, const std::string &detail) {
-  printf("case=%s buf=%s ok=%d", name.c_str(), buf.c_str(), ok ? 1 : 0);
-  if (t.n) printf(" ms=%.3f min=%.3f max=%.3f n=%d", t.mean, t.min, t.max, t.n);
-  if (!extra.empty()) printf(" %s", extra.c_str());
-  printf(" detail=%s\n", one_line(detail.c_str()).c_str());
-  fflush(stdout);
+  char head[256];
+  snprintf(head, sizeof head, "case=%s buf=%s ok=%d", name.c_str(), buf.c_str(), ok ? 1 : 0);
+  std::string line = head;
+  if (t.n) {
+    char tm[128];
+    snprintf(tm, sizeof tm, " ms=%.3f min=%.3f max=%.3f n=%d", t.mean, t.min, t.max, t.n);
+    line += tm;
+  }
+  if (!extra.empty()) line += " " + extra;
+  line += " detail=" + one_line(detail.c_str()) + "\n";
+  fputs(line.c_str(), g_results);  // one write per line, so lines never interleave
+  fflush(g_results);
   if (!ok && (buf == "-" || g_gating_buffers.count(buf))) g_all_ok = false;
+  if (!ok && (buf == "va" || buf == "va-wrap") && !g_refused.count(buf)) g_refused[buf] = name + ": " + detail;
 }
 
 static std::string status_text(IM_STATUS s) { return std::to_string((int)s) + " " + one_line(imStrError_t(s)); }
@@ -398,6 +412,11 @@ struct Ctx {
 
 // Allocates the in/out buffers of one case, or reports why it could not.
 static bool buffers(const Ctx &c, const std::string &name, size_t in_size, size_t out_size, Buf *&in, Buf *&out) {
+  in = out = nullptr;
+  if (g_refused.count(c.kind)) {
+    emit(name, c.kind, false, {}, "", "not attempted, an earlier case on this buffer type failed (" + g_refused[c.kind] + ")");
+    return false;
+  }
   in = alloc_buf(c.kind, in_size);
   out = alloc_buf(c.kind, out_size);
   std::string e = !in->error.empty() ? in->error : out->error;
@@ -925,6 +944,12 @@ int main(int argc, char **argv) {
     if (a == "--selftest") {
       selftest();
       return g_all_ok ? 0 : 1;
+    } else if (a == "--results" && i + 1 < argc) {
+      g_results = fopen(argv[++i], "w");
+      if (!g_results) {
+        fprintf(stderr, "cannot open %s: %s\n", argv[i], strerror(errno));
+        return 2;
+      }
     } else if (a == "--buffers" && i + 1 < argc) {
       kinds.clear();
       std::string list = argv[++i];
@@ -938,7 +963,7 @@ int main(int argc, char **argv) {
     } else if (a == "--stress" && i + 1 < argc) {
       stress = atoi(argv[++i]);
     } else {
-      fprintf(stderr, "usage: rgaprobe [--selftest] [--buffers va,system,...] [--iterations N] [--stress N]\n");
+      fprintf(stderr, "usage: rgaprobe [--selftest] [--results FILE] [--buffers system,va,...] [--iterations N] [--stress N]\n");
       return 2;
     }
   }
