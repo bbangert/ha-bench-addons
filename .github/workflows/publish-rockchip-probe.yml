@@ -1,0 +1,57 @@
+name: Publish rockchip probe image
+
+# Separate from publish.yml because this image is arm64-only and shares nothing
+# with the Elixir probe. Naming follows the same rule: config.yaml says
+#
+#   image: ghcr.io/bbangert/ha-bench-addons/{arch}-rockchip-probe
+#
+# and the tag must equal the app's `version`. Every download inside the build is
+# hash-checked against rockchip_probe/SOURCES, so a changed upstream file fails
+# here rather than shipping.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rockchip_probe/**"
+      - ".github/workflows/publish-rockchip-probe.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    # A manual run from another branch must not overwrite the published tag.
+    if: github.ref == 'refs/heads/main'
+    # Native arm64: the MPP build under QEMU takes far longer than on hardware.
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        run: |
+          version=$(grep -E '^version:' rockchip_probe/config.yaml | sed -E 's/^version:[[:space:]]*"?([^"]+)"?/\1/')
+          [ -n "$version" ] || { echo "::error::could not read version from rockchip_probe/config.yaml"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publishing version $version"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./rockchip_probe
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ github.repository }}/aarch64-rockchip-probe:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository }}/aarch64-rockchip-probe:latest
+          cache-from: type=gha,scope=rockchip-probe
+          cache-to: type=gha,mode=max,scope=rockchip-probe

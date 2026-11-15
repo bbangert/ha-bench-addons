@@ -7,6 +7,7 @@ Home Assistant add-ons for poking at APIs from inside an add-on container, on a
 |---|---|
 | [`elixir_probe`](elixir_probe/) | Token-gated remote Elixir eval endpoint, for exercising the Supervisor and Core APIs interactively |
 | `probe_*` | The same image, installed under different declared permissions |
+| [`rockchip_probe`](rockchip_probe/) | Runs the RK3566/RK3568 NPU, GPU, video codecs and RGA 2D accelerator from inside an app container and reports what worked |
 
 ## Permission variants
 
@@ -37,6 +38,22 @@ handler answers 405, which is itself the signal that authorization passed.
 
 `probe_admin` holds the highest role the Supervisor grants and this image
 exposes a remote eval endpoint. Bench only.
+
+## Rockchip accelerator probe
+
+`rockchip_probe` is unrelated to the API probes: an arm64-only app for a
+Rockchip RK3566/RK3568 board (built for the Home Assistant Green) that runs an
+NPU inference, a headless GLES render, hardware H.264/H.265 decode and H.264
+encode, and RGA scaling and colour conversion, then serves a JSON report on
+port 4010. Its image bundles Arm's Mali userspace driver and Rockchip's MPP and
+librga, each pinned by hash and shipped with its licence text. Rockchip's RKNN
+runtime and example are not redistributed by this repository or the image: the
+app downloads them from the upstream repository at first start, pinned by
+hash, so the first start needs internet access. They come under Rockchip's
+terms, which at the pinned tag are an as-is copyright statement. The app is
+offered for a test bench only. It is published by
+`.github/workflows/publish-rockchip-probe.yml`. See
+[its README](rockchip_probe/README.md).
 
 ## Adding it to a HAOS installation
 
