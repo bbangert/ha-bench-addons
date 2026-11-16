@@ -8,6 +8,7 @@ Home Assistant add-ons for poking at APIs from inside an add-on container, on a
 | [`elixir_probe`](elixir_probe/) | Token-gated remote Elixir eval endpoint, for exercising the Supervisor and Core APIs interactively |
 | `probe_*` | The same image, installed under different declared permissions |
 | [`rockchip_probe`](rockchip_probe/) | Runs the RK3566/RK3568 NPU, GPU, video codecs and RGA 2D accelerator from inside an app container and reports what worked |
+| [`cairn-rockchip`](cairn-rockchip/) | Staging copy of [Cairn NVR](https://github.com/bbangert/cairn-nvr)'s Rockchip add-on, to check a store install on the Green before it is released |
 
 ## Permission variants
 
@@ -54,6 +55,18 @@ terms, which at the pinned tag are an as-is copyright statement. The app is
 offered for a test bench only. It is published by
 `.github/workflows/publish-rockchip-probe.yml`. See
 [its README](rockchip_probe/README.md).
+
+## Cairn NVR (Rockchip) staging
+
+`cairn-rockchip` is not a probe. It is the add-on directory from
+`bbangert/cairn-nvr` (`deploy/vagus-addon/cairn-rockchip/`, copied unchanged at
+commit `6f6808a`), here so the Green can install it from a store before
+cairn-nvr publishes it. Nothing in this repository builds its image:
+`config.yaml` pulls `ghcr.io/bbangert/cairn-nvr-rockchip-aarch64`, which
+cairn-nvr's `container.yml` workflow publishes. The directory keeps cairn-nvr's
+name, a hyphen where the slug has an underscore, because whether that pairing
+installs is one of the things being checked. Remove the directory once the
+add-on is released from its own repository.
 
 ## Adding it to a HAOS installation
 
