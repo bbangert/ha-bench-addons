@@ -68,6 +68,11 @@ name, a hyphen where the slug has an underscore, because whether that pairing
 installs is one of the things being checked. Remove the directory once the
 add-on is released from its own repository.
 
+Cairn runs with `host_network` and serves its UI on host port 4000, which
+`elixir_probe` also maps. Stop `elixir_probe`, or move its host port in the
+add-on's Network settings, before starting Cairn; the `probe_*` variants use
+4001–4008 and do not collide.
+
 ## Adding it to a HAOS installation
 
 1. Push this directory to a GitHub repo, with `repository.yaml` at the **root**
