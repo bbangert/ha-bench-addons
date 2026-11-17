@@ -1,5 +1,5 @@
-"""Proves, from inside an app container, that a Rockchip RK3566/RK3568's NPU,
-GPU and video codecs work with the userspace bundled in this image.
+"""Proves, from inside an app container, that a Rockchip RK3566/RK3568 or
+RK3576's NPU, GPU and video codecs work with the userspace bundled in this image.
 
 Runs every selected probe once, then serves the report over HTTP until
 stopped, so the app stays started and the result can be fetched headlessly.
@@ -44,7 +44,20 @@ DEFAULT_OPTIONS = {"probes": list(ALL_PROBES), "npu_loop_seconds": 10, "rknn_fet
 RUNTIME_SOURCES = os.path.join(ROOT, "RUNTIME_SOURCES")
 RKNN_FETCH_SECONDS = 120
 ENCODE_FRAMES = 30
-SUPPORTED_SOCS = ("rockchip,rk3566", "rockchip,rk3568")
+
+# The only per-SoC choices. Order matters: the first entry is also what
+# ROCKCHIP_PROBE_IGNORE_SOC=1 falls back to on an unlisted SoC. The libmali
+# blob, MPP and librga are the same for both: JeffyCN/mirrors gpu-chips.txt
+# maps rk3566_rk3568 and rk3576 to bifrost-g52, and MPP/librga carry both.
+SOCS = [
+    {"name": "rk3566", "compatible": ("rockchip,rk3566", "rockchip,rk3568"),
+     "model_entry": "resnet18-model-rk3566", "model_file": "resnet18_for_rk3566_rk3568.rknn",
+     # MPP's SoC table: RK356[678] -> VEPU541 (osal/mpp_soc.c, mpp/soc.cmake).
+     "encoder_hal": "hal_h264e_vepu541"},
+    {"name": "rk3576", "compatible": ("rockchip,rk3576",),
+     "model_entry": "resnet18-model-rk3576", "model_file": "resnet18_for_rk3576.rknn",
+     "encoder_hal": "hal_h264e_vepu510"},
+]
 
 # Mirrors `devices:` in config.yaml, plus the Rockchip CMA heap some kernels add.
 DEVICE_NODES = [
@@ -181,12 +194,20 @@ def soc_info():
     source, compat = read_device_tree("compatible")
     _, model = read_device_tree("model")
     compatible = [c for c in (compat or b"").decode("utf-8", "replace").split("\0") if c]
+    entry = next((e for e in SOCS if any(c in e["compatible"] for c in compatible)), None)
     return {
         "source": source,
         "compatible": compatible,
         "model": model.decode("utf-8", "replace").rstrip("\0") if model else None,
-        "supported": any(c in SUPPORTED_SOCS for c in compatible),
+        "supported": entry is not None,
+        "name": entry["name"] if entry else None,
     }
+
+
+def soc_choices(soc):
+    """The table entry to run with, and whether it was a guess for an unlisted SoC."""
+    entry = next((e for e in SOCS if e["name"] == soc["name"]), None)
+    return (entry, False) if entry else (SOCS[0], True)
 
 
 def describe_node(path):
@@ -262,10 +283,12 @@ def device_tree_access():
 def probe_environment(ctx):
     soc = ctx["soc"]
     dt_access, notes = device_tree_access()
+    choice, guessed = soc_choices(soc)
     nodes = sorted(set(DEVICE_NODES) | set(glob.glob("/dev/dri/*")) | set(glob.glob("/dev/dma_heap/*"))
                    | set(glob.glob("/dev/rk_dma_heap/*")))
     raw = {
         "device_tree": {**soc, "readable": dt_access, "soc_check_used": soc["source"]},
+        "per_soc": {**{k: v for k, v in choice.items() if k != "compatible"}, "guessed_for_unlisted_soc": guessed},
         "notes": notes,
         "kernel": {"release": os.uname().release, "version": os.uname().version,
                    "machine": os.uname().machine, "proc_version": read_text("/proc/version")},
@@ -276,7 +299,8 @@ def probe_environment(ctx):
         "uid": os.getuid(),
         "rknn_files": ctx.get("rknn"),
         "image": {"app_version": app_version(), "components": components(),
-                  "fetched_at_start": rknn_fetch.read_sources(RUNTIME_SOURCES),
+                  "fetched_at_start": rknn_fetch.select_sources(rknn_fetch.read_sources(RUNTIME_SOURCES),
+                                                                choice["model_entry"]),
                   "clips": json.loads(read_text(os.path.join(ROOT, "clips", "clips.json")) or "{}")},
     }
     present = [n["path"] for n in raw["devices"] if n.get("present")]
@@ -288,6 +312,9 @@ def probe_environment(ctx):
     if missing:
         detail += f"; absent: {', '.join(missing)}"
     detail += f"; SoC check read {soc['source']}/compatible"
+    detail += (f"; per-SoC choices from {choice['name']}"
+               + (" (guessed: SoC not listed)" if guessed else "")
+               + f": model {choice['model_file']}, encoder HAL {choice['encoder_hal']}")
     if notes:
         detail += "; note: " + "; ".join(notes)
     return "pass", detail, raw
@@ -342,7 +369,7 @@ def probe_npu(ctx):
         return "fail", f"RKNN files not available: {rknn_unavailable(rknn)}", {"rknn_files": rknn}
     npu = rknn["directory"]
     worker = os.path.join(ROOT, "npu_worker.py")
-    paths = {"model": os.path.join(npu, "resnet18_for_rk3566_rk3568.rknn"),
+    paths = {"model": os.path.join(npu, soc_choices(ctx["soc"])[0]["model_file"]),
              "image": os.path.join(npu, "space_shuttle_224.jpg"),
              "labels": os.path.join(npu, "synset_label.py")}
     rknn_env = {"PYTHONPATH": rknn["site_dir"],
@@ -523,7 +550,7 @@ def mpp_decode(path, codec, expected_frames):
     return check, ("; ".join([summary] + problems) if problems else summary)
 
 
-def encode_check(r, size, requested):
+def encode_check(r, size, requested, expected_hal):
     text = output_of(r)
     # The bound encoder HAL is named in the mpp_enc_hal_debug "found api" line,
     # or as the log tag ("mpp[pid]: hal_h264e_x: ...") of its own messages. The
@@ -542,9 +569,14 @@ def encode_check(r, size, requested):
         problems.append(f"{'no' if got is None else got} frames encoded, expected {requested}")
     if not hal:
         problems.append("no encoder HAL bound")
+    # MPP has no software encoder, so any bound HAL is hardware; a different
+    # one from the table is worth seeing but is not a failure.
     check = {"codec": "h264", "bytes": size, "requested_frames": requested, "frames": got, "hal": hal,
+             "expected_hal": expected_hal, "hal_as_expected": bool(hal) and all(h == expected_hal for h in hal),
              "ok": not problems, "process": r}
     summary = f"h264 encode {'?' if got is None else got}/{requested} frames, {size} bytes via {','.join(hal) or '?'}"
+    if hal and not check["hal_as_expected"]:
+        summary += f" (expected {expected_hal}; reported only)"
     return check, "; ".join([summary] + problems)
 
 
@@ -572,7 +604,7 @@ def probe_vpu(ctx):
     r = run(["/usr/local/bin/mpi_enc_test", "-t", "7", "-w", "1280", "-h", "720", "-n", str(ENCODE_FRAMES),
              "-o", out], timeout=60, env={"mpp_enc_hal_debug": "2", "mpp_debug": "16"})
     size = os.path.getsize(out) if os.path.exists(out) else 0
-    raw["encode"], enc_summary = encode_check(r, size, ENCODE_FRAMES)
+    raw["encode"], enc_summary = encode_check(r, size, ENCODE_FRAMES, soc_choices(ctx["soc"])[0]["encoder_hal"])
     parts.append(enc_summary)
     ok &= raw["encode"]["ok"]
 
@@ -622,6 +654,10 @@ def parse_rgaprobe(text):
     return results, log_lines
 
 
+def heap_absent(result):
+    return bool(result) and not result["ok"] and re.match(r"open /dev/\S+: No such file or directory", result["detail"]) is not None
+
+
 def rga_verdict(results):
     by = {(r["case"], r.get("buf")): r for r in results}
     problems = []
@@ -633,6 +669,10 @@ def rga_verdict(results):
     for buf in buffers:
         failed = [c for c in RGA_CASES if not by.get((c, buf), {}).get("ok")]
         summary[buf] = "all cases ok" if not failed else "failed: " + ", ".join(failed)
+        # A heap the kernel does not create (rk-dma-heap-cma on some boards) is
+        # a fact about the board, not a failed case.
+        if failed and all(heap_absent(by.get((c, buf))) for c in RGA_CASES):
+            summary[buf] = "not present"
     for buf in RGA_GATING_BUFFERS:
         failed = [c for c in RGA_CASES if not by.get((c, buf), {}).get("ok")]
         if failed:
@@ -847,11 +887,11 @@ def publish():
     return snapshot, write_report(snapshot)
 
 
-def fetch_rknn(allow_download):
+def fetch_rknn(allow_download, model_entry):
     # In a child process with a hard kill, so a stalled DNS lookup or TLS
     # handshake cannot hold the other probes beyond the fetch budget.
     r = run([sys.executable, rknn_fetch.__file__, RUNTIME_SOURCES, "1" if allow_download else "0",
-             str(RKNN_FETCH_SECONDS)], timeout=RKNN_FETCH_SECONDS + 15)
+             str(RKNN_FETCH_SECONDS), model_entry], timeout=RKNN_FETCH_SECONDS + 15)
     found = [line[len("FETCH_JSON:"):] for line in r.get("stdout", "").splitlines() if line.startswith("FETCH_JSON:")]
     if found:
         return json.loads(found[-1])
@@ -865,14 +905,18 @@ def run_all():
     forced = os.environ.get("ROCKCHIP_PROBE_IGNORE_SOC") == "1"
     t0 = time.monotonic()
     with REPORT_LOCK:
-        REPORT.update({"options": options, "option_notes": notes, "soc": {**soc, "check_ignored": forced}})
+        choice, guessed = soc_choices(soc)
+        REPORT.update({"options": options, "option_notes": notes,
+                       "soc": {**soc, "check_ignored": forced,
+                               "per_soc": {"table_entry": choice["name"], "model_file": choice["model_file"],
+                                           "encoder_hal": choice["encoder_hal"], "guessed": guessed}}})
     publish()
 
     ctx = {"options": options, "soc": soc}
     unsupported = not soc["supported"] and not forced
     if "npu" in options["probes"] and not unsupported:
         log("fetching the RKNN files" if options["rknn_fetch"] else "checking the RKNN cache (rknn_fetch is false)")
-        ctx["rknn"] = fetch_rknn(options["rknn_fetch"])
+        ctx["rknn"] = fetch_rknn(options["rknn_fetch"], soc_choices(soc)[0]["model_entry"])
         log(f"RKNN files: {'ok' if ctx['rknn'].get('ok') else rknn_unavailable(ctx['rknn'])} "
             f"in {ctx['rknn'].get('seconds')} s")
         with REPORT_LOCK:
