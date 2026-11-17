@@ -658,8 +658,10 @@ def parse_rgaprobe(text):
     return results, log_lines
 
 
+# Only heap paths: rgaprobe also says "open /dev/rga: No such file ..." for every
+# buffer type when the RGA device itself is missing, which is a failure.
 def heap_absent(result):
-    return bool(result) and not result["ok"] and re.match(r"open /dev/\S+: No such file or directory", result["detail"]) is not None
+    return bool(result) and not result["ok"] and re.fullmatch(r"open /dev/(dma_heap|rk_dma_heap)/\S+: No such file or directory", result["detail"]) is not None
 
 
 def rga_verdict(results):

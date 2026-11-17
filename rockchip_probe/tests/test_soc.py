@@ -93,6 +93,13 @@ class RgaHeaps(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertEqual(summary["rk-dma-heap-cma"], "not present")
 
+    def test_missing_rga_device_is_a_failure_not_a_missing_heap(self):
+        detail = "open /dev/rga: No such file or directory; librga not called"
+        problems, summary = rp.rga_verdict(self.results(detail))
+        self.assertTrue(summary["rk-dma-heap-cma"].startswith("failed"))
+        self.assertFalse(rp.heap_absent({"ok": False, "detail": detail}))
+        self.assertTrue(rp.heap_absent({"ok": False, "detail": "open /dev/dma_heap/reserved: No such file or directory"}))
+
     def test_a_refused_allocation_is_still_a_failure_for_that_heap(self):
         _, summary = rp.rga_verdict(self.results("DMA_HEAP_IOCTL_ALLOC on /dev/x: Cannot allocate memory"))
         self.assertTrue(summary["rk-dma-heap-cma"].startswith("failed"))
