@@ -8,7 +8,7 @@ image. Built for the Home Assistant Green (RK3566, vendor 6.1 kernel).
 | SoC | Board | Status |
 |---|---|---|
 | RK3566 | Home Assistant Green | Run on hardware |
-| RK3576 | Radxa ROCK 4D | Run on hardware (4 GiB board, vendor 6.1 kernel); a 6 GiB board has not been run |
+| RK3576 | Radxa ROCK 4D | Run on hardware (4 GiB and 6 GiB boards, vendor 6.1 kernel) |
 
 See [Results on hardware](#results-on-hardware).
 
@@ -189,21 +189,31 @@ RGA, and runs during the image build.
 **Home Assistant Green (RK3566).** The RGA findings above come from it: every
 dma-heap buffer type accepted, user memory refused.
 
-**ROCK 4D (RK3576, 4 GiB, kernel 6.1.172), one run of 35.3 s, overall `fail`
-only because of the NPU TOP5 list that this version corrects.**
+**ROCK 4D (RK3576, kernel 6.1.172).** The same image, 0.2.0, was run on a 4 GiB
+and a 6 GiB board; both finished with overall `pass`, 5 of 5 probes.
 
-| Probe | Result |
+| | 4 GiB | 6 GiB |
+|---|---|---|
+| Run time | 33.8 s | 37.3 s |
+| `npu` inferences per second (10 s loop) | 135.27 (1353, 7.01 ms average) | 134.68 (1347, 7.04 ms average) |
+| H.264 decode, 150/150 frames via `h264d_vdpu383` | 857.96 fps | 891.15 fps |
+| H.265 decode, 150/150 frames via `h265d_vdpu383` | 792.54 fps | 794.47 fps |
+| RGA letterbox, `system` heap (CPU reference) | 2.251 ms (16.249 ms) | 2.293 ms (16.389 ms) |
+
+| Probe | Result, on both boards |
 |---|---|
 | `environment` | pass; SoC `rk3576` detected; `rk-dma-heap-cma` absent |
 | `gpu` | pass; GBM on `card0`, OpenGL ES 3.2 (DDK g29p1), Mali-G52, clear colour read back |
-| `vpu` | pass; MPP detected `rk3576`; H.264 150/150 frames via `h264d_vdpu383` (859 fps), H.265 150/150 via `h265d_vdpu383` (819 fps), encode 30/30 via `hal_h264e_vepu510` |
-| `rga` | pass; RGA_2_PRO, API 1.10.5; letterbox 2.28 ms; stress 500 jobs, 0 failed, 1 checksum; every case ok on `system`, `system-uncached` and `reserved` buffers **and on user memory (`va`, `va-wrap`)**; `rk-dma-heap-cma` reported as not present |
-| `npu` | inference works: TOP1 `[812] space shuttle` 0.999638, TOP5 `[812, 404, 657, 833, 466]`; librknnrt 2.3.2, driver 0.9.8; 1322 inferences in 10.01 s (132.13/s, 7.18 ms average) |
+| `vpu` | pass; MPP detected `rk3576`; encode 30/30 frames via `hal_h264e_vepu510` |
+| `rga` | pass; RGA_2_PRO, API 1.10.5; stress 500 jobs, 0 failed, 1 checksum; every case ok on `system`, `system-uncached` and `reserved` buffers **and on user memory (`va`, `va-wrap`)**; `rk-dma-heap-cma` reported as not present |
+| `npu` | pass; TOP1 `[812] space shuttle`, TOP5 `[812, 404, 657, 833, 466]`; librknnrt 2.3.2, driver 0.9.8 |
 
 Unlike the RK3566, the RK3576's two RGA2 cores sit behind an IOMMU, so RGA jobs
 on user memory are accepted there; the per-core page-table limitation described
 under [RGA](#rga) is an RK356x one. The ROCK 4D's kernel creates no
-`rk-dma-heap-cma` heap. Nothing here was measured on a 6 GiB board.
+`rk-dma-heap-cma` heap. On the 6 GiB board nothing checked that any buffer
+actually sat above 4 GiB, so the run does not show how RGA handles memory
+there.
 
 ## Device access
 

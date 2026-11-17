@@ -44,7 +44,7 @@ exposes a remote eval endpoint. Bench only.
 
 `rockchip_probe` is unrelated to the API probes: an arm64-only app for a
 Rockchip RK3566/RK3568 board (built for the Home Assistant Green; the
-Radxa ROCK 4D's RK3576 is also supported and was run on a 4 GiB board) that runs an
+Radxa ROCK 4D's RK3576 is also supported and was run on 4 GiB and 6 GiB boards) that runs an
 NPU inference, a headless GLES render, hardware H.264/H.265 decode and H.264
 encode, and RGA scaling and colour conversion, then serves a JSON report on
 port 4010. Its image bundles Arm's Mali userspace driver and Rockchip's MPP and
