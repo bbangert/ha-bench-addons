@@ -8,10 +8,9 @@ image. Built for the Home Assistant Green (RK3566, vendor 6.1 kernel).
 | SoC | Board | Status |
 |---|---|---|
 | RK3566 | Home Assistant Green | Run on hardware |
-| RK3576 | Radxa ROCK 4D | Supported, not yet run on hardware |
+| RK3576 | Radxa ROCK 4D | Run on hardware (4 GiB board, vendor 6.1 kernel); a 6 GiB board has not been run |
 
-The RK3576 support is written from the vendor sources and the board's measured
-device nodes; no result from a ROCK 4D is claimed anywhere here.
+See [Results on hardware](#results-on-hardware).
 
 **Test bench only.** The image bundles Arm's Mali userspace driver, and the
 app downloads Rockchip's RKNN runtime and example at first start (see
@@ -102,6 +101,13 @@ The detected SoC picks the following, and the report records them under
 |---|---|---|
 | RKNN model | `resnet18_for_rk3566_rk3568.rknn` | `resnet18_for_rk3576.rknn` |
 | Expected H.264 encoder HAL | `hal_h264e_vepu541` | `hal_h264e_vepu510` |
+| Expected NPU TOP5 | `[812, 404, 657, 466, 895]` | `[812, 404, 657, 833, 466]` |
+
+The RK3566 list is the one published in the example's README, which notes that
+other platforms and driver versions "may have slightly different results". The
+RK3576 list was measured on a ROCK 4D, where 833 ranks fifth ahead of 466 and
+895 drops out. The gate stays strict for both: TOP1 must be 812 and the five
+classes must be exactly the expected set.
 
 Everything else (the libmali blob, MPP, librga, the RKNN runtime and wheel) is
 shared. A bound encoder HAL other than the expected one is reported, not
@@ -114,7 +120,7 @@ failed; the frame count and a non-empty stream still gate. With
 | Probe | Pass when |
 |---|---|
 | `environment` | The device tree `compatible` and `model` are readable. Also inventories the device nodes (type, major:minor, mode, whether they open read-write), the kernel version and the versions of everything in the image. |
-| `npu` | The official rknn-toolkit-lite2 resnet18 example runs on the NPU and its TOP5 classes match the example's published result (`[812] space shuttle` first). Records the runtime and kernel driver versions (`0.9.8` is expected; another version is reported, not failed), then loops inference for `npu_loop_seconds` and records throughput; the loop fails the probe if it completes no inference or if the TOP1 class ever changes. NPU load is sampled from `/proc/rknpu/load` or `/sys/kernel/debug/rknpu/load` if either is visible in the container, otherwise recorded as not available. |
+| `npu` | The official rknn-toolkit-lite2 resnet18 example runs on the NPU and its TOP5 classes match the expected list for the SoC (`[812] space shuttle` first; see [Per-SoC choices](#per-soc-choices)). Records the runtime and kernel driver versions (`0.9.8` is expected; another version is reported, not failed), then loops inference for `npu_loop_seconds` and records throughput; the loop fails the probe if it completes no inference or if the TOP1 class ever changes. NPU load is sampled from `/proc/rknpu/load` or `/sys/kernel/debug/rknpu/load` if either is visible in the container, otherwise recorded as not available. |
 | `gpu` | `eglprobe` gets a GLES 3 context through the GBM platform on the `rockchip` DRM card, reports `OpenGL ES 3.x` and a `Mali-G52` renderer, completes an FBO and reads back the clear colour `255,0,0,255`. The surfaceless (`EGL_PLATFORM_SURFACELESS_MESA`) and default-display (`eglGetDisplay(EGL_DEFAULT_DISPLAY)`) paths are tried and recorded with `"gating": false`; they never affect the result. On a Green, surfaceless failed and the default display worked; GBM is the path the probe relies on. |
 | `vpu` | `mpi_dec_test` decodes the H.264 and H.265 test clips through a hardware HAL that MPP names in its log, producing the expected frame count with no error frames; `mpi_enc_test` encodes exactly the 30 requested frames through a hardware HAL named in its log (on a Green, `hal_h264e_vepu541`; an RK3576 is expected to use `hal_h264e_vepu510`, see [Per-SoC choices](#per-soc-choices)) into a non-empty H.264 stream. `mpp_info_test` output is recorded. |
 | `rga` | `rgaprobe` (below) reads the library and driver versions and runs copy, resize, colour conversion, the letterbox, crop+rotate+flip and fill, each checked against a CPU reference. Passes when the version is readable, every case passes with dma-bufs from `/dev/dma_heap/system`, and the 500-job stress run has no failures and one output checksum. |
@@ -177,6 +183,27 @@ this, so consumers on this kernel should hand RGA dma-buf fds, such as dma-heap
 allocations or the decoder's own frame buffers.
 `rgaprobe --selftest` checks the pattern generator and CPU references without
 RGA, and runs during the image build.
+
+## Results on hardware
+
+**Home Assistant Green (RK3566).** The RGA findings above come from it: every
+dma-heap buffer type accepted, user memory refused.
+
+**ROCK 4D (RK3576, 4 GiB, kernel 6.1.172), one run of 35.3 s, overall `fail`
+only because of the NPU TOP5 list that this version corrects.**
+
+| Probe | Result |
+|---|---|
+| `environment` | pass; SoC `rk3576` detected; `rk-dma-heap-cma` absent |
+| `gpu` | pass; GBM on `card0`, OpenGL ES 3.2 (DDK g29p1), Mali-G52, clear colour read back |
+| `vpu` | pass; MPP detected `rk3576`; H.264 150/150 frames via `h264d_vdpu383` (859 fps), H.265 150/150 via `h265d_vdpu383` (819 fps), encode 30/30 via `hal_h264e_vepu510` |
+| `rga` | pass; RGA_2_PRO, API 1.10.5; letterbox 2.28 ms; stress 500 jobs, 0 failed, 1 checksum; every case ok on `system`, `system-uncached` and `reserved` buffers **and on user memory (`va`, `va-wrap`)**; `rk-dma-heap-cma` reported as not present |
+| `npu` | inference works: TOP1 `[812] space shuttle` 0.999638, TOP5 `[812, 404, 657, 833, 466]`; librknnrt 2.3.2, driver 0.9.8; 1322 inferences in 10.01 s (132.13/s, 7.18 ms average) |
+
+Unlike the RK3566, the RK3576's two RGA2 cores sit behind an IOMMU, so RGA jobs
+on user memory are accepted there; the per-core page-table limitation described
+under [RGA](#rga) is an RK356x one. The ROCK 4D's kernel creates no
+`rk-dma-heap-cma` heap. Nothing here was measured on a 6 GiB board.
 
 ## Device access
 

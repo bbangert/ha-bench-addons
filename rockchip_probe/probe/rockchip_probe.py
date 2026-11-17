@@ -53,10 +53,15 @@ SOCS = [
     {"name": "rk3566", "compatible": ("rockchip,rk3566", "rockchip,rk3568"),
      "model_entry": "resnet18-model-rk3566", "model_file": "resnet18_for_rk3566_rk3568.rknn",
      # MPP's SoC table: RK356[678] -> VEPU541 (osal/mpp_soc.c, mpp/soc.cmake).
-     "encoder_hal": "hal_h264e_vepu541"},
+     "encoder_hal": "hal_h264e_vepu541",
+     # The example README's published result.
+     "expected_top5": [812, 404, 657, 466, 895]},
     {"name": "rk3576", "compatible": ("rockchip,rk3576",),
      "model_entry": "resnet18-model-rk3576", "model_file": "resnet18_for_rk3576.rknn",
-     "encoder_hal": "hal_h264e_vepu510"},
+     "encoder_hal": "hal_h264e_vepu510",
+     # Measured on a ROCK 4D: the RK3576 model ranks 833 above 466 and 895 drops
+     # out, so the example's list would fail a working NPU.
+     "expected_top5": [812, 404, 657, 833, 466]},
 ]
 
 # Mirrors `devices:` in config.yaml, plus the Rockchip CMA heap some kernels add.
@@ -67,8 +72,6 @@ DEVICE_NODES = [
     "/dev/rk_dma_heap/rk-dma-heap-cma",
 ]
 
-# From the official example's README (rknn-toolkit-lite2/examples/resnet18).
-EXPECTED_TOP5 = [812, 404, 657, 466, 895]
 EXPECTED_NPU_DRIVER = "0.9.8"
 NPU_LOAD_FILES = ["/proc/rknpu/load", "/sys/kernel/debug/rknpu/load"]
 NPU_VERSION_FILES = ["/proc/rknpu/version", "/sys/kernel/debug/rknpu/version"]
@@ -368,6 +371,7 @@ def probe_npu(ctx):
     if not rknn.get("ok"):
         return "fail", f"RKNN files not available: {rknn_unavailable(rknn)}", {"rknn_files": rknn}
     npu = rknn["directory"]
+    expected_top5 = soc_choices(ctx["soc"])[0]["expected_top5"]
     worker = os.path.join(ROOT, "npu_worker.py")
     paths = {"model": os.path.join(npu, soc_choices(ctx["soc"])[0]["model_file"]),
              "image": os.path.join(npu, "space_shuttle_224.jpg"),
@@ -425,7 +429,7 @@ def probe_npu(ctx):
         "driver_version": driver.group(1) if driver else None,
         "kernel_version_file": {"path": version_file, "text": version_text},
         "result": result,
-        "expected_top5": EXPECTED_TOP5,
+        "expected_top5": expected_top5,
         "load": {"file": load_file, "max_percent": max_load, "samples": samples[-240:]},
         "runtime_log": [ln for ln in text.splitlines() if "RKNN" in ln or "rknn" in ln][:50],
         "worker": r,
@@ -438,8 +442,8 @@ def probe_npu(ctx):
         problems.append(f"worker {failure_of(r)}" + (f": {result['error']}" if result.get("error") else ""))
     if not top:
         problems.append("no inference result")
-    elif indices[0] != EXPECTED_TOP5[0] or set(indices) != set(EXPECTED_TOP5):
-        problems.append(f"TOP5 {indices} != expected {EXPECTED_TOP5}")
+    elif indices[0] != expected_top5[0] or set(indices) != set(expected_top5):
+        problems.append(f"TOP5 {indices} != expected {expected_top5}")
     if top:
         problems += non_finite_problems(result, top)
         problems += npu_loop_problems(result, loop_seconds)
@@ -447,7 +451,7 @@ def probe_npu(ctx):
     parts = []
     if top:
         parts.append(f"TOP1 [{top[0]['index']}] {top[0]['label']} {top[0]['score']}")
-        parts.append("TOP5 order " + ("matches" if indices == EXPECTED_TOP5 else "differs from") + " the example")
+        parts.append("TOP5 order " + ("matches" if indices == expected_top5 else "differs from") + " the expected order")
     if raw["runtime_version"]:
         parts.append(f"librknnrt {raw['runtime_version']}")
     if raw["driver_version"]:

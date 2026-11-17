@@ -48,6 +48,15 @@ class SocTable(unittest.TestCase):
             self.assertIn(shared, names)
 
 
+class NpuExpectations(unittest.TestCase):
+    def test_top5_per_soc(self):
+        by = {e["name"]: e["expected_top5"] for e in rp.SOCS}
+        self.assertEqual(by["rk3566"], [812, 404, 657, 466, 895])
+        self.assertEqual(by["rk3576"], [812, 404, 657, 833, 466])
+        for top5 in by.values():
+            self.assertEqual(top5[0], 812)
+
+
 class Encoder(unittest.TestCase):
     LOG = "mpp[1]: found api hal_h264e_vepu510 for coding 7 client 3\nencode 30 frames\n"
 
