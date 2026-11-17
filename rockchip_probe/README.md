@@ -154,8 +154,9 @@ timing. All cases run for every buffer type: dma-bufs from `system`,
 `system-uncached`, `reserved` and `rk-dma-heap-cma`, user memory imported with
 `importbuffer_virtualaddr` (`va`), and user memory passed per job with
 `wrapbuffer_virtualaddr` (`va-wrap`). Only `system` gates; the others are
-reported per buffer type, and a heap the kernel does not create (the ROCK 4D has no
-`rk-dma-heap-cma`) is reported as `not present`. On `va` and `va-wrap`, once one case fails the
+reported per buffer type, and a heap whose device node cannot be opened (ENOENT, because the
+kernel does not create it or the container was not given it) is reported as
+`not present`. On `va` and `va-wrap`, once one case fails the
 remaining cases are reported as not attempted rather than submitted, since
 each refused job makes librga print a long error table; a failing case is
 never retried for timing. The report keeps the first and last 40 lines of
@@ -189,8 +190,14 @@ RGA, and runs during the image build.
 **Home Assistant Green (RK3566).** The RGA findings above come from it: every
 dma-heap buffer type accepted, user memory refused.
 
-**ROCK 4D (RK3576, kernel 6.1.172).** The same image, 0.2.0, was run on a 4 GiB
-and a 6 GiB board; both finished with overall `pass`, 5 of 5 probes.
+**ROCK 4D (RK3576, kernel 6.1.172).** The same image, 0.2.0, was run three
+times: hand-started containers on a 4 GiB and a 6 GiB board, and then an install
+through the app store on the 6 GiB board. All finished with overall `pass`,
+5 of 5 probes. The kernel creates `/dev/rk_dma_heap/rk-dma-heap-cma` (char
+249:0), but the two hand-started containers were not given that node, so those
+runs did not exercise the heap; the store-installed run did.
+
+*Hand-started containers.*
 
 | | 4 GiB | 6 GiB |
 |---|---|---|
@@ -202,18 +209,30 @@ and a 6 GiB board; both finished with overall `pass`, 5 of 5 probes.
 
 | Probe | Result, on both boards |
 |---|---|
-| `environment` | pass; SoC `rk3576` detected; `rk-dma-heap-cma` absent |
+| `environment` | pass; SoC `rk3576` detected; `rk-dma-heap-cma` absent only because the node was not passed in |
 | `gpu` | pass; GBM on `card0`, OpenGL ES 3.2 (DDK g29p1), Mali-G52, clear colour read back |
 | `vpu` | pass; MPP detected `rk3576`; encode 30/30 frames via `hal_h264e_vepu510` |
-| `rga` | pass; RGA_2_PRO, API 1.10.5; stress 500 jobs, 0 failed, 1 checksum; every case ok on `system`, `system-uncached` and `reserved` buffers **and on user memory (`va`, `va-wrap`)**; `rk-dma-heap-cma` reported as not present |
+| `rga` | pass; RGA_2_PRO, API 1.10.5; stress 500 jobs, 0 failed, 1 checksum; every case ok on `system`, `system-uncached` and `reserved` buffers **and on user memory (`va`, `va-wrap`)**; `rk-dma-heap-cma` reported as not present (node not passed in) |
 | `npu` | pass; TOP1 `[812] space shuttle`, TOP5 `[812, 404, 657, 833, 466]`; librknnrt 2.3.2, driver 0.9.8 |
+
+*Installed through the app store (6 GiB board, no display attached).* Overall
+`pass`, 5 of 5 probes, in 39.3 s.
+
+| Probe | Result |
+|---|---|
+| `environment` | pass; 11 device nodes present, none absent |
+| `gpu` | pass; as above |
+| `vpu` | pass; H.264 decode 150/150 frames via `h264d_vdpu383` at 890.86 fps; H.265 decode 150/150 via `h265d_vdpu383` at 1001.86 fps; encode 30/30 frames via `hal_h264e_vepu510` |
+| `rga` | pass; RGA_2_PRO; letterbox 2.269 ms (CPU reference 16.377 ms); stress 500 jobs, 0 failed, 1 checksum; every case ok on `reserved`, `rk-dma-heap-cma`, `system` and `system-uncached` buffers and on `va` and `va-wrap` |
+| `npu` | pass; 1333 inferences in 10.0 s (133.24/s, 7.12 ms average); TOP5 as expected |
 
 Unlike the RK3566, the RK3576's two RGA2 cores sit behind an IOMMU, so RGA jobs
 on user memory are accepted there; the per-core page-table limitation described
-under [RGA](#rga) is an RK356x one. The ROCK 4D's kernel creates no
-`rk-dma-heap-cma` heap. On the 6 GiB board nothing checked that any buffer
-actually sat above 4 GiB, so the run does not show how RGA handles memory
-there.
+under [RGA](#rga) is an RK356x one. The board reserves two CMA areas at boot,
+16 MiB at `0xff000000` and 32 MiB at `0x100000000`, so one sits at and above the
+4 GiB boundary. Which area backs which heap was not checked, and nothing
+checked that any buffer actually sat above 4 GiB, so the runs do not show how
+RGA handles memory there.
 
 ## Device access
 
@@ -280,6 +299,7 @@ podman run --rm -p 4010:8000 \
   --device /dev/mali0 --device /dev/mpp_service --device /dev/rga \
   --device /dev/dma_heap/system --device /dev/dma_heap/system-uncached \
   --device /dev/dma_heap/reserved \
+  --device /dev/rk_dma_heap/rk-dma-heap-cma \
   --security-opt unmask=/sys/firmware \
   --mount type=bind,src=/sys/firmware/devicetree/base,dst=/device-tree,ro \
   -v /var/lib/rockchip-probe-data:/data \
@@ -287,8 +307,9 @@ podman run --rm -p 4010:8000 \
 ```
 
 The same command serves the Green and the ROCK 4D (the NPU is `card1`/`renderD129`
-on both). Pass only `--device` paths that exist: podman refuses a missing one,
-which is why `rk-dma-heap-cma` is not listed.
+on both). Pass only `--device` paths that exist: podman refuses a missing one.
+A heap node left out of the command is reported as `not present` even where the
+kernel created it.
 
 The unmask is what lets `/proc/device-tree` resolve, which MPP needs; the bind
 alone satisfies only the probe's own SoC check.
