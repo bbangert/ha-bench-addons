@@ -20,6 +20,7 @@ FALLBACK_DIR = "/tmp/rockchip-probe-rknn"
 # Where the runtime and the unpacked wheel go when the cache cannot map code.
 EXEC_DIRS = ("/var/lib/rockchip-probe/rknn-exec", "/tmp/rockchip-probe-rknn-exec")
 WHEEL_NAME = "rknn-toolkit-lite2"
+MODEL_PREFIX = "resnet18-model-"
 
 
 def read_sources(path):
@@ -31,6 +32,12 @@ def read_sources(path):
             entries.append({"name": name, "version": version, "sha256": sha, "size": int(size), "file": file,
                             "url": url})
     return entries
+
+
+def select_sources(entries, model):
+    # One model per SoC is listed; fetching the others would be wasted bandwidth
+    # for files this board can never run.
+    return [e for e in entries if not e["name"].startswith(MODEL_PREFIX) or e["name"] == model]
 
 
 def sha256_of(path):
@@ -187,7 +194,7 @@ def point_link(directory):
     os.replace(tmp, LINK_DIR)
 
 
-def ensure(sources_path, allow_download, budget_seconds=120):
+def ensure(sources_path, allow_download, budget_seconds=120, model=None):
     t0 = time.monotonic()
     deadline = t0 + budget_seconds
     report = {"allow_download": allow_download, "files": [], "ok": False}
@@ -209,7 +216,10 @@ def ensure(sources_path, allow_download, budget_seconds=120):
             pass
 
     ok = True
-    for src in read_sources(sources_path):
+    sources = read_sources(sources_path)
+    if model:
+        sources = select_sources(sources, model)
+    for src in sources:
         path = os.path.join(directory, src["file"])
         entry = {"name": src["name"], "file": src["file"], "url": src["url"], "sha256": src["sha256"]}
         if os.path.exists(path):
@@ -261,5 +271,5 @@ def ensure(sources_path, allow_download, budget_seconds=120):
 # Run as a child of the probe, which kills it at a hard limit: name resolution
 # and TLS setup block in ways no per-read timeout covers.
 if __name__ == "__main__":
-    result = ensure(sys.argv[1], sys.argv[2] == "1", float(sys.argv[3]))
+    result = ensure(sys.argv[1], sys.argv[2] == "1", float(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else None)
     print("FETCH_JSON:" + json.dumps(result), flush=True)

@@ -7,7 +7,7 @@ Home Assistant add-ons for poking at APIs from inside an add-on container, on a
 |---|---|
 | [`elixir_probe`](elixir_probe/) | Token-gated remote Elixir eval endpoint, for exercising the Supervisor and Core APIs interactively |
 | `probe_*` | The same image, installed under different declared permissions |
-| [`rockchip_probe`](rockchip_probe/) | Runs the RK3566/RK3568 NPU, GPU, video codecs and RGA 2D accelerator from inside an app container and reports what worked |
+| [`rockchip_probe`](rockchip_probe/) | Runs the RK3566/RK3568/RK3576 NPU, GPU, video codecs and RGA 2D accelerator from inside an app container and reports what worked |
 | [`cairn-rockchip`](cairn-rockchip/) | Staging copy of [Cairn NVR](https://github.com/bbangert/cairn-nvr)'s Rockchip add-on, to check a store install on the Green before it is released |
 
 ## Permission variants
@@ -43,7 +43,8 @@ exposes a remote eval endpoint. Bench only.
 ## Rockchip accelerator probe
 
 `rockchip_probe` is unrelated to the API probes: an arm64-only app for a
-Rockchip RK3566/RK3568 board (built for the Home Assistant Green) that runs an
+Rockchip RK3566/RK3568 board (built for the Home Assistant Green; the
+Radxa ROCK 4D's RK3576 is also supported and was run on 4 GiB and 6 GiB boards) that runs an
 NPU inference, a headless GLES render, hardware H.264/H.265 decode and H.264
 encode, and RGA scaling and colour conversion, then serves a JSON report on
 port 4010. Its image bundles Arm's Mali userspace driver and Rockchip's MPP and

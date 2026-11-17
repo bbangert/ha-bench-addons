@@ -2,8 +2,15 @@
 
 Checks, from inside an app container, that the NPU, GPU, video codecs and RGA
 2D accelerator of a
-Rockchip RK3566 or RK3568 work with the userspace bundled in this image. Built
-for the Home Assistant Green (RK3566, vendor 6.1 kernel).
+Rockchip RK3566, RK3568 or RK3576 work with the userspace bundled in this
+image. Built for the Home Assistant Green (RK3566, vendor 6.1 kernel).
+
+| SoC | Board | Status |
+|---|---|---|
+| RK3566 | Home Assistant Green | Run on hardware |
+| RK3576 | Radxa ROCK 4D | Run on hardware (4 GiB and 6 GiB boards, vendor 6.1 kernel) |
+
+See [Results on hardware](#results-on-hardware).
 
 **Test bench only.** The image bundles Arm's Mali userspace driver, and the
 app downloads Rockchip's RKNN runtime and example at first start (see
@@ -39,7 +46,8 @@ The image does not contain Rockchip's RKNN files. When the `npu` probe is
 selected, the app downloads them on start from the pinned upstream URLs in
 [`RUNTIME_SOURCES`](RUNTIME_SOURCES) (airockchip/rknn-toolkit2 at commit
 `42aa1d4`, the v2.3.2 tag): `librknnrt.so`, the rknn-toolkit-lite2 cp311
-wheel, and the resnet18 example's model, test image and labels. Each download
+wheel, the resnet18 example's model for the detected SoC (the other SoC's model
+is not fetched), and its test image and labels. Each download
 goes to a temporary name and is kept only if its sha256 matches; nothing is
 imported or loaded before that. Files are kept in `/data/rknn` and re-checked
 on every start; a file that fails the check is deleted and fetched again. The
@@ -62,7 +70,8 @@ self-check after the fetch imports `rknnlite`, loads the runtime and confirms
 the decoded test image is the one the official example feeds the model. If
 any file is missing, the `npu` probe fails with `RKNN files not available: …`
 and the other probes run as usual. To run offline, copy the five files into
-`/data/rknn` and set `rknn_fetch: false`.
+`/data/rknn` and set `rknn_fetch: false`; the model is `resnet18_for_rk3566_rk3568.rknn` or
+`resnet18_for_rk3576.rknn`.
 
 Every probe reports `{name, status, detail, raw, started_at, finished_at}`
 with `status` one of `pass`, `fail`, `skipped` or `reported`. `summary.overall`
@@ -79,18 +88,41 @@ An unusable `options.json` (not an object, a non-list `probes`, a
 `npu_loop_seconds` outside 0–120, however large, is clamped; `option_notes` in
 the report says what was ignored or clamped and why.
 
-If `/proc/device-tree/compatible` does not name `rockchip,rk3566` or
-`rockchip,rk3568`, only `environment` runs, the others are `skipped`, and
-`summary.overall` is `unsupported SoC` with the compatible string.
+If `/proc/device-tree/compatible` does not name `rockchip,rk3566`,
+`rockchip,rk3568` or `rockchip,rk3576`, only `environment` runs, the others are
+`skipped`, and `summary.overall` is `unsupported SoC` with the compatible string.
+
+### Per-SoC choices
+
+The detected SoC picks the following, and the report records them under
+`soc.per_soc` (and, in full, in the `environment` probe's `raw.per_soc`):
+
+| | RK3566 / RK3568 | RK3576 |
+|---|---|---|
+| RKNN model | `resnet18_for_rk3566_rk3568.rknn` | `resnet18_for_rk3576.rknn` |
+| Expected H.264 encoder HAL | `hal_h264e_vepu541` | `hal_h264e_vepu510` |
+| Expected NPU TOP5 | `[812, 404, 657, 466, 895]` | `[812, 404, 657, 833, 466]` |
+
+The RK3566 list is the one published in the example's README, which notes that
+other platforms and driver versions "may have slightly different results". The
+RK3576 list was measured on a ROCK 4D, where 833 ranks fifth ahead of 466 and
+895 drops out. The gate stays strict for both: TOP1 must be 812 and the five
+classes must be exactly the expected set.
+
+Everything else (the libmali blob, MPP, librga, the RKNN runtime and wheel) is
+shared. A bound encoder HAL other than the expected one is reported, not
+failed; the frame count and a non-empty stream still gate. With
+`ROCKCHIP_PROBE_IGNORE_SOC=1` on an unlisted SoC the RK3566 choices are used and
+`per_soc.guessed` is true.
 
 ## What each probe checks
 
 | Probe | Pass when |
 |---|---|
 | `environment` | The device tree `compatible` and `model` are readable. Also inventories the device nodes (type, major:minor, mode, whether they open read-write), the kernel version and the versions of everything in the image. |
-| `npu` | The official rknn-toolkit-lite2 resnet18 example runs on the NPU and its TOP5 classes match the example's published result (`[812] space shuttle` first). Records the runtime and kernel driver versions (`0.9.8` is expected; another version is reported, not failed), then loops inference for `npu_loop_seconds` and records throughput; the loop fails the probe if it completes no inference or if the TOP1 class ever changes. NPU load is sampled from `/proc/rknpu/load` or `/sys/kernel/debug/rknpu/load` if either is visible in the container, otherwise recorded as not available. |
+| `npu` | The official rknn-toolkit-lite2 resnet18 example runs on the NPU and its TOP5 classes match the expected list for the SoC (`[812] space shuttle` first; see [Per-SoC choices](#per-soc-choices)). Records the runtime and kernel driver versions (`0.9.8` is expected; another version is reported, not failed), then loops inference for `npu_loop_seconds` and records throughput; the loop fails the probe if it completes no inference or if the TOP1 class ever changes. NPU load is sampled from `/proc/rknpu/load` or `/sys/kernel/debug/rknpu/load` if either is visible in the container, otherwise recorded as not available. |
 | `gpu` | `eglprobe` gets a GLES 3 context through the GBM platform on the `rockchip` DRM card, reports `OpenGL ES 3.x` and a `Mali-G52` renderer, completes an FBO and reads back the clear colour `255,0,0,255`. The surfaceless (`EGL_PLATFORM_SURFACELESS_MESA`) and default-display (`eglGetDisplay(EGL_DEFAULT_DISPLAY)`) paths are tried and recorded with `"gating": false`; they never affect the result. On a Green, surfaceless failed and the default display worked; GBM is the path the probe relies on. |
-| `vpu` | `mpi_dec_test` decodes the H.264 and H.265 test clips through a hardware HAL that MPP names in its log, producing the expected frame count with no error frames; `mpi_enc_test` encodes exactly the 30 requested frames through a hardware HAL named in its log (on a Green, `hal_h264e_vepu541`) into a non-empty H.264 stream. `mpp_info_test` output is recorded. |
+| `vpu` | `mpi_dec_test` decodes the H.264 and H.265 test clips through a hardware HAL that MPP names in its log, producing the expected frame count with no error frames; `mpi_enc_test` encodes exactly the 30 requested frames through a hardware HAL named in its log (on a Green, `hal_h264e_vepu541`; an RK3576 is expected to use `hal_h264e_vepu510`, see [Per-SoC choices](#per-soc-choices)) into a non-empty H.264 stream. `mpp_info_test` output is recorded. |
 | `rga` | `rgaprobe` (below) reads the library and driver versions and runs copy, resize, colour conversion, the letterbox, crop+rotate+flip and fill, each checked against a CPU reference. Passes when the version is readable, every case passes with dma-bufs from `/dev/dma_heap/system`, and the 500-job stress run has no failures and one output checksum. |
 
 ### RGA
@@ -122,7 +154,8 @@ timing. All cases run for every buffer type: dma-bufs from `system`,
 `system-uncached`, `reserved` and `rk-dma-heap-cma`, user memory imported with
 `importbuffer_virtualaddr` (`va`), and user memory passed per job with
 `wrapbuffer_virtualaddr` (`va-wrap`). Only `system` gates; the others are
-reported per buffer type. On `va` and `va-wrap`, once one case fails the
+reported per buffer type, and a heap the kernel does not create (the ROCK 4D has no
+`rk-dma-heap-cma`) is reported as `not present`. On `va` and `va-wrap`, once one case fails the
 remaining cases are reported as not attempted rather than submitted, since
 each refused job makes librga print a long error table; a failing case is
 never retried for timing. The report keeps the first and last 40 lines of
@@ -150,6 +183,37 @@ this, so consumers on this kernel should hand RGA dma-buf fds, such as dma-heap
 allocations or the decoder's own frame buffers.
 `rgaprobe --selftest` checks the pattern generator and CPU references without
 RGA, and runs during the image build.
+
+## Results on hardware
+
+**Home Assistant Green (RK3566).** The RGA findings above come from it: every
+dma-heap buffer type accepted, user memory refused.
+
+**ROCK 4D (RK3576, kernel 6.1.172).** The same image, 0.2.0, was run on a 4 GiB
+and a 6 GiB board; both finished with overall `pass`, 5 of 5 probes.
+
+| | 4 GiB | 6 GiB |
+|---|---|---|
+| Run time | 33.8 s | 37.3 s |
+| `npu` inferences per second (10 s loop) | 135.27 (1353, 7.01 ms average) | 134.68 (1347, 7.04 ms average) |
+| H.264 decode, 150/150 frames via `h264d_vdpu383` | 857.96 fps | 891.15 fps |
+| H.265 decode, 150/150 frames via `h265d_vdpu383` | 792.54 fps | 794.47 fps |
+| RGA letterbox, `system` heap (CPU reference) | 2.251 ms (16.249 ms) | 2.293 ms (16.389 ms) |
+
+| Probe | Result, on both boards |
+|---|---|
+| `environment` | pass; SoC `rk3576` detected; `rk-dma-heap-cma` absent |
+| `gpu` | pass; GBM on `card0`, OpenGL ES 3.2 (DDK g29p1), Mali-G52, clear colour read back |
+| `vpu` | pass; MPP detected `rk3576`; encode 30/30 frames via `hal_h264e_vepu510` |
+| `rga` | pass; RGA_2_PRO, API 1.10.5; stress 500 jobs, 0 failed, 1 checksum; every case ok on `system`, `system-uncached` and `reserved` buffers **and on user memory (`va`, `va-wrap`)**; `rk-dma-heap-cma` reported as not present |
+| `npu` | pass; TOP1 `[812] space shuttle`, TOP5 `[812, 404, 657, 833, 466]`; librknnrt 2.3.2, driver 0.9.8 |
+
+Unlike the RK3566, the RK3576's two RGA2 cores sit behind an IOMMU, so RGA jobs
+on user memory are accepted there; the per-core page-table limitation described
+under [RGA](#rga) is an RK356x one. The ROCK 4D's kernel creates no
+`rk-dma-heap-cma` heap. On the 6 GiB board nothing checked that any buffer
+actually sat above 4 GiB, so the run does not show how RGA handles memory
+there.
 
 ## Device access
 
@@ -215,11 +279,16 @@ podman run --rm -p 4010:8000 \
   --device /dev/dri/card1 --device /dev/dri/renderD129 \
   --device /dev/mali0 --device /dev/mpp_service --device /dev/rga \
   --device /dev/dma_heap/system --device /dev/dma_heap/system-uncached \
+  --device /dev/dma_heap/reserved \
   --security-opt unmask=/sys/firmware \
   --mount type=bind,src=/sys/firmware/devicetree/base,dst=/device-tree,ro \
   -v /var/lib/rockchip-probe-data:/data \
-  ghcr.io/bbangert/ha-bench-addons/aarch64-rockchip-probe:0.1.0
+  ghcr.io/bbangert/ha-bench-addons/aarch64-rockchip-probe:0.2.0
 ```
+
+The same command serves the Green and the ROCK 4D (the NPU is `card1`/`renderD129`
+on both). Pass only `--device` paths that exist: podman refuses a missing one,
+which is why `rk-dma-heap-cma` is not listed.
 
 The unmask is what lets `/proc/device-tree` resolve, which MPP needs; the bind
 alone satisfies only the probe's own SoC check.

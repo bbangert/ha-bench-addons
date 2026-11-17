@@ -1,7 +1,7 @@
 name: Rockchip Probe
 slug: rockchip_probe
-version: "0.1.0"
-description: Runs the RK3566/RK3568 NPU, GPU, video codecs and RGA 2D accelerator from inside an app container and reports what worked
+version: "0.2.0"
+description: Runs the RK3566/RK3568 or RK3576 NPU, GPU, video codecs and RGA 2D accelerator from inside an app container and reports what worked
 arch:
   - aarch64
 init: false
@@ -23,7 +23,9 @@ boot: manual
 devicetree: true
 
 # Absent nodes are skipped, so the list can be the superset across kernels.
-# The NPU is a DRM device here (renderD129 on the Green), not /dev/rknpu.
+# The NPU is a DRM device here (renderD129 on the Green and the ROCK 4D), not
+# /dev/rknpu. rk-dma-heap-cma exists on the Green only; the ROCK 4D's kernel
+# creates no such heap, which the report shows as "not present".
 devices:
   - /dev/dri/card0
   - /dev/dri/card1
