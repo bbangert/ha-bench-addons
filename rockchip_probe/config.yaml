@@ -24,8 +24,8 @@ devicetree: true
 
 # Absent nodes are skipped, so the list can be the superset across kernels.
 # The NPU is a DRM device here (renderD129 on the Green and the ROCK 4D), not
-# /dev/rknpu. rk-dma-heap-cma exists on the Green only; the ROCK 4D's kernel
-# creates no such heap, which the report shows as "not present".
+# /dev/rknpu. A container only sees the heap nodes listed here, so one left out
+# is reported as "not present" even when the kernel created it.
 devices:
   - /dev/dri/card0
   - /dev/dri/card1
